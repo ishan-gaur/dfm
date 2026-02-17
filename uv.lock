@@ -538,6 +538,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "dfm", marker = "sys_platform == 'linux'" },
     { name = "jupyter", marker = "sys_platform == 'linux'" },
     { name = "nbconvert", marker = "sys_platform == 'linux'" },
     { name = "pytest", marker = "sys_platform == 'linux'" },
@@ -558,6 +559,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "dfm", virtual = "." },
     { name = "jupyter", specifier = ">=1.1.1" },
     { name = "nbconvert", specifier = ">=7.17.0" },
     { name = "pytest", specifier = ">=9.0.2" },

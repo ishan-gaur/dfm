@@ -17,6 +17,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "dfm",
     "jupyter>=1.1.1",
     "nbconvert>=7.17.0",
     "pytest>=9.0.2",
@@ -24,6 +25,14 @@ dev = [
 ]
 
 [tool.uv.extra-build-dependencies]
+
+[tool.uv.workspace]
+members = [
+    ".",
+]
+
+[tool.uv.sources]
+dfm = { workspace = true }
 
 [tool.uv]
 environments = ["sys_platform == 'linux'"]
