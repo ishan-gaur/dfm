@@ -13,11 +13,13 @@ dependencies = [
     "wandb>=0.25.0",
     "ruff>=0.15.1",
     "python-lsp-server>=1.14.0",
+    "transformers<4.48.2",
 ]
 
 [dependency-groups]
 dev = [
     "dfm",
+    "esm>=3.0.3",
     "jupyter>=1.1.1",
     "nbconvert>=7.17.0",
     "pytest>=9.0.2",
