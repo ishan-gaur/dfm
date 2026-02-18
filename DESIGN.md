@@ -23,3 +23,8 @@ Main types:
 - Predictive model takes one-hot encoded sequences as input so that TAG works as expected
     - So we need to adjust ESM accordingly if it is to be a backbone for linear probes
         (linear probs will take an "embed" function as input, which will be the ESM embedding for ESM, etc.)
+
+
+DATASET:
+# Guidance dataset build on top of regular model training dataset, which is linked to its sampler
+# Conditional training and guidance training can use the same dataset, they just treat different parts as inputs and output

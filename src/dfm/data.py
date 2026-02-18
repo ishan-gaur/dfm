@@ -23,6 +23,8 @@ def uniform_schedule() -> float:
     return random.random()
 
 
+# Guidance dataset build on top of regular model training dataset, which is linked to its sampler
+# Conditional training and guidance training can use the same dataset, they just treat different parts as inputs and output
 class GuidanceDataset(torch.utils.data.Dataset):
     """
     Dataset for training noisy classifiers for guidance.
@@ -61,7 +63,7 @@ class GuidanceDataset(torch.utils.data.Dataset):
                 f"Length mismatch: {len(sequences)} sequences, {len(self.labels)} labels"
             )
 
-        if not isinstance(self.sequence_metadata, Iterable) and not hasattr(
+        if self.sequence_metadata is not None and not isinstance(self.sequence_metadata, Iterable) and not hasattr(
             self.sequence_metadata, "__getitem__"
         ):
             raise ValueError(

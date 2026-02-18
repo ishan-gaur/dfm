@@ -31,24 +31,26 @@ class TransitionModel(nn.Module, ABC):
 
             def __init__(self, checkpoint="esmc_300m"):
                 tokenizer = EsmSequenceTokenizer()
-                format_logits = MaskedModelLogitFomatter(tokenizer, "<mask>", self.OUTPUT_DIM)
-                super().__init__(tokenizer=tokenizer, format_logits=format_logits)
+                format_logits = MaskedModelLogitFormatter(tokenizer, "<mask>", self.OUTPUT_DIM)
+                super().__init__(tokenizer=tokenizer, logit_formatter=format_logits)
                 self.model = ESMC.from_pretrained(checkpoint)
 
             def forward(self, seq_SP):
                 logits = self.model(seq_SP).sequence_logits.float()
-                logits = self.format_logits(logits, seq_SP)
+                logits = self.logit_formatter(logits, seq_SP)
                 return F.log_softmax(logits, dim=-1)
     """
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase, format_logits: LogitFormatter):
+    def __init__(
+        self, tokenizer: PreTrainedTokenizerBase, logit_formatter: LogitFormatter
+    ):
         super().__init__()
         self.tokenizer = tokenizer
-        self.format_logits = format_logits
+        self.logit_formatter = logit_formatter
 
     @abstractmethod
     def forward(self, seq_SP: torch.LongTensor) -> torch.FloatTensor:
-        """Return logits with ``format_logits`` already applied."""
+        """Returns Logits"""
         pass
 
     @property
@@ -56,24 +58,18 @@ class TransitionModel(nn.Module, ABC):
         return next(self.parameters()).device
 
     def forward_from_string(self, sequences: list[str]):
-        # TODO[pi] can I just get the encoded, padded sequences from the tokenizer directly?
-        ids_list = [self.tokenizer.encode(s) for s in sequences]
-        max_len = max(len(x) for x in ids_list)
-        padded = []
-        for x in ids_list:
-            x_list = x if isinstance(x, list) else x.tolist()
-            padded.append(
-                x_list + [self.tokenizer.pad_token_id] * (max_len - len(x_list))
-            )
-        seq_SP = torch.tensor(padded, device=self.device, dtype=torch.long)
+        tokenized = self.tokenizer(sequences, padding=True, return_tensors="pt")
+        seq_SP = tokenized["input_ids"].to(device=self.device, dtype=torch.long)
+        print(seq_SP)
         return self.forward(seq_SP)
 
-    def get_transition_log_probs(
-        self,
-    ):  # TODO[pi] not quite sure about this part and how it will play with the conditional model, maybe we should discuss
-        def forward_unconditional(seq_SP: torch.LongTensor):
+    def get_transition_log_probs_fn(self):
+        def calc_log_probs(seq_SP: torch.LongTensor):
             logits_SPT = self.forward(seq_SP)
-            return self.format_logits(logits_SPT, seq_SP)
+            logits_SPT = self.logit_formatter(logits_SPT, seq_SP)
+            logp_seq_SPT = F.log_softmax(logits_SPT, dim=2)
+            return logp_seq_SPT
+        return calc_log_probs
 
 
 @runtime_checkable

@@ -70,7 +70,7 @@ class FakeTokenizer:
 
 # ---------------------------------------------------------------------------
 # Concrete TransitionModel children — mirror the ESM pattern:
-#   super().__init__(tokenizer=..., format_logits=...)
+#   super().__init__(tokenizer=..., logit_formatter=...)
 # ---------------------------------------------------------------------------
 
 VOCAB_SIZE = 24  # 20 AA + 4 special
@@ -81,26 +81,26 @@ class StubTransitionModel(TransitionModel):
     """Concrete child that mirrors ESM's structure:
 
     - Wraps a simple linear 'backbone' (so parameters() is non-empty)
-    - Passes tokenizer & format_logits up to the ABC __init__
+    - Passes tokenizer & logit_formatter up to the ABC __init__
     - forward() returns log-softmax logits of shape (S, P, OUTPUT_DIM)
     """
 
     def __init__(
         self,
         tokenizer: FakeTokenizer | None = None,
-        formatter: LogitFormatter | None = None,
+        logit_formatter: LogitFormatter | None = None,
         output_dim: int = OUTPUT_DIM,
     ):
         tok = tokenizer or FakeTokenizer()
-        fmt = formatter or PassThroughLogitFormatter()
-        super().__init__(tokenizer=tok, format_logits=fmt)
+        fmt = logit_formatter or PassThroughLogitFormatter()
+        super().__init__(tokenizer=tok, logit_formatter=fmt)
         self._backbone = nn.Linear(1, 1)  # gives us a parameter for .device
         self._output_dim = output_dim
 
     def forward(self, seq_SP: torch.LongTensor) -> torch.FloatTensor:
         S, P = seq_SP.shape
         logits_SPT = torch.randn(S, P, self._output_dim, device=seq_SP.device)
-        logits_SPT = self.format_logits(logits_SPT, seq_SP)
+        logits_SPT = self.logit_formatter(logits_SPT, seq_SP)
         return F.log_softmax(logits_SPT, dim=-1)
 
 
@@ -109,7 +109,7 @@ class RecordingTransitionModel(TransitionModel):
 
     def __init__(self, tokenizer: FakeTokenizer | None = None):
         tok = tokenizer or FakeTokenizer()
-        super().__init__(tokenizer=tok, format_logits=PassThroughLogitFormatter())
+        super().__init__(tokenizer=tok, logit_formatter=PassThroughLogitFormatter())
         self._backbone = nn.Linear(1, 1)
         self.forward_calls: list[torch.Tensor] = []
 
@@ -149,7 +149,7 @@ class TestABCContract:
         with pytest.raises(TypeError, match="abstract"):
             TransitionModel(
                 tokenizer=FakeTokenizer(),
-                format_logits=PassThroughLogitFormatter(),
+                logit_formatter=PassThroughLogitFormatter(),
             )
 
     def test_missing_forward_raises(self):
@@ -159,7 +159,7 @@ class TestABCContract:
         with pytest.raises(TypeError, match="abstract"):
             NoForward(
                 tokenizer=FakeTokenizer(),
-                format_logits=PassThroughLogitFormatter(),
+                logit_formatter=PassThroughLogitFormatter(),
             )
 
     def test_complete_implementation_instantiates(self, model):
@@ -169,10 +169,10 @@ class TestABCContract:
     def test_tokenizer_set_by_init(self, model, tokenizer):
         assert model.tokenizer is tokenizer
 
-    def test_format_logits_set_by_init(self):
+    def test_logit_formatter_set_by_init(self):
         fmt = PassThroughLogitFormatter()
-        m = StubTransitionModel(formatter=fmt)
-        assert m.format_logits is fmt
+        m = StubTransitionModel(logit_formatter=fmt)
+        assert m.logit_formatter is fmt
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +203,7 @@ class TestDevice:
 
         m = NoParams(
             tokenizer=FakeTokenizer(),
-            format_logits=PassThroughLogitFormatter(),
+            logit_formatter=PassThroughLogitFormatter(),
         )
         with pytest.raises(StopIteration):
             _ = m.device
@@ -229,10 +229,12 @@ class TestForward:
         assert torch.allclose(sums, torch.ones_like(sums), atol=1e-5)
 
     def test_batched_forward(self, model):
-        seq = torch.tensor([
-            [21, 0, 4, 7, 22, 20],  # CLS A E H EOS PAD
-            [21, 1, 2, 3, 8, 22],   # CLS C D F I EOS
-        ])
+        seq = torch.tensor(
+            [
+                [21, 0, 4, 7, 22, 20],  # CLS A E H EOS PAD
+                [21, 1, 2, 3, 8, 22],  # CLS C D F I EOS
+            ]
+        )
         out = model(seq)
         assert out.shape == (2, 6, OUTPUT_DIM)
 
@@ -308,22 +310,20 @@ class TestForwardFromString:
 
 
 # ---------------------------------------------------------------------------
-# format_logits interaction tests
+# logit_formatter interaction tests
 # ---------------------------------------------------------------------------
 
 
 class TestFormatLogitsIntegration:
-    """Verify that the ABC's contract around format_logits plays correctly
+    """Verify that the ABC's contract around logit_formatter plays correctly
     with MaskedModelLogitFomatter — the formatter used by ESM."""
 
     @pytest.fixture
     def esm_like_model(self, tokenizer):
         """Model using MaskedModelLogitFomatter, like the real ESM class."""
-        formatter = MaskedModelLogitFomatter(
-            tokenizer, "<mask>", output_dim=OUTPUT_DIM
-        )
+        formatter = MaskedModelLogitFomatter(tokenizer, "<mask>", output_dim=OUTPUT_DIM)
         return StubTransitionModel(
-            tokenizer=tokenizer, formatter=formatter, output_dim=OUTPUT_DIM
+            tokenizer=tokenizer, logit_formatter=formatter, output_dim=OUTPUT_DIM
         )
 
     def test_mask_positions_block_special_tokens(self, esm_like_model, tokenizer):
@@ -378,9 +378,9 @@ class TestFormatLogitsIntegration:
                 f"Non-special token {idx} should have nonzero prob"
             )
 
-    def test_format_logits_is_accessible(self, esm_like_model):
-        assert isinstance(esm_like_model.format_logits, LogitFormatter)
-        assert isinstance(esm_like_model.format_logits, MaskedModelLogitFomatter)
+    def test_logit_formatter_is_accessible(self, esm_like_model):
+        assert isinstance(esm_like_model.logit_formatter, LogitFormatter)
+        assert isinstance(esm_like_model.logit_formatter, MaskedModelLogitFomatter)
 
 
 # ---------------------------------------------------------------------------
@@ -388,15 +388,15 @@ class TestFormatLogitsIntegration:
 # ---------------------------------------------------------------------------
 
 
-class TestGetTransitionLogProbs:
-    """get_transition_log_probs should return a callable that applies
-    format_logits to the raw forward output. Currently the method body
+class TestGetTransitionLogProbsFn:
+    """get_transition_log_probs_fn should return a callable that applies
+    logit_formatter to the raw forward output. Currently the method body
     is incomplete (no return statement), so this documents intended behavior."""
 
-    def test_returns_none_currently(self, model):
-        """get_transition_log_probs has no return statement — documents the bug."""
-        result = model.get_transition_log_probs()
-        assert result is None  # BUG: should return forward_unconditional
+    def test_returns_callable(self, model):
+        """get_transition_log_probs_fn should return a callable."""
+        result = model.get_transition_log_probs_fn()
+        assert callable(result)
 
 
 # ---------------------------------------------------------------------------
@@ -425,15 +425,13 @@ class TestModuleIntegration:
         assert model.training
 
     def test_formatter_submodule_device_propagation(self, tokenizer):
-        """When format_logits is an nn.Module (like MaskedModelLogitFomatter),
+        """When logit_formatter is an nn.Module (like MaskedModelLogitFomatter),
         registering it as a submodule lets .to(device) propagate buffers."""
-        formatter = MaskedModelLogitFomatter(
-            tokenizer, "<mask>", output_dim=OUTPUT_DIM
-        )
+        formatter = MaskedModelLogitFomatter(tokenizer, "<mask>", output_dim=OUTPUT_DIM)
 
         class ModuleFormatterModel(TransitionModel):
             def __init__(self):
-                super().__init__(tokenizer=tokenizer, format_logits=formatter)
+                super().__init__(tokenizer=tokenizer, logit_formatter=formatter)
                 self._backbone = nn.Linear(1, 1)
                 # Register formatter as a named submodule so .to() propagates
                 self.add_module("_formatter_module", formatter)

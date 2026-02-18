@@ -3,6 +3,9 @@ name = "dfm"
 version = "0.1.0"
 description = "Everything you need for training, sampling from, and guiding discrete sequence models and using them as part of discrete flow matching, discrete diffusion, any-order autoregressive, or masked language models. Supports basic training and sampling for both conditional and unconditional models."
 readme = "README.md"
+authors = [
+    { name = "Ishan Gaur", email = "ishang@berkeley.edu" }
+]
 requires-python = ">=3.12.0, <3.13"
 dependencies = [
     "rc-foundry[all]",
@@ -11,30 +14,17 @@ dependencies = [
     "numpy",
     "pandas",
     "wandb>=0.25.0",
-    "ruff>=0.15.1",
     "python-lsp-server>=1.14.0",
     "transformers<4.48.2",
+    "esm>=3.2.3",
 ]
 
 [dependency-groups]
 dev = [
-    "dfm",
-    "esm>=3.0.3",
-    "jupyter>=1.1.1",
-    "nbconvert>=7.17.0",
     "pytest>=9.0.2",
     "ruff>=0.15.1",
 ]
 
-[tool.uv.extra-build-dependencies]
-
-[tool.uv.workspace]
-members = [
-    ".",
-]
-
-[tool.uv.sources]
-dfm = { workspace = true }
-
-[tool.uv]
-environments = ["sys_platform == 'linux'"]
+[build-system]
+requires = ["uv_build>=0.9.22,<0.10.0"]
+build-backend = "uv_build"
