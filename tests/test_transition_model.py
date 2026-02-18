@@ -23,58 +23,64 @@ from dfm.generative_model import (
 # ---------------------------------------------------------------------------
 
 
-class FakeTokenizer:
-    """Minimal tokenizer satisfying TransitionModel.forward_from_string needs.
+# class FakeTokenizer:
+#     """Minimal tokenizer satisfying TransitionModel.forward_from_string needs.
 
-    20 standard amino acids (A-Y) at indices 0-19,
-    plus <pad>=20, <cls>=21, <eos>=22, <mask>=23.
-    """
+#     20 standard amino acids (A-Y) at indices 0-19,
+#     plus <pad>=20, <cls>=21, <eos>=22, <mask>=23.
+#     """
 
-    _AA = "ACDEFGHIKLMNPQRSTVWY"
+#     _AA = "ACDEFGHIKLMNPQRSTVWY"
 
-    def __init__(self):
-        self.vocab: dict[str, int] = {aa: i for i, aa in enumerate(self._AA)}
-        self.vocab["<pad>"] = 20
-        self.vocab["<cls>"] = 21
-        self.vocab["<eos>"] = 22
-        self.vocab["<mask>"] = 23
-        self._idx_to_token = {v: k for k, v in self.vocab.items()}
+#     def __init__(self):
+#         self.vocab: dict[str, int] = {aa: i for i, aa in enumerate(self._AA)}
+#         self.vocab["<pad>"] = 20
+#         self.vocab["<cls>"] = 21
+#         self.vocab["<eos>"] = 22
+#         self.vocab["<mask>"] = 23
+#         self._idx_to_token = {v: k for k, v in self.vocab.items()}
 
-        self.pad_token_id = 20
-        self.cls_token_id = 21
-        self.eos_token_id = 22
-        self.mask_token_id = 23
+#         self.pad_token_id = 20
+#         self.cls_token_id = 21
+#         self.eos_token_id = 22
+#         self.mask_token_id = 23
 
-        # HF tokenizers expose special tokens via added_tokens_decoder
-        self.added_tokens_decoder: dict[int, object] = {
-            20: "<pad>",
-            21: "<cls>",
-            22: "<eos>",
-            23: "<mask>",
-        }
+#         # HF tokenizers expose special tokens via added_tokens_decoder
+#         self.added_tokens_decoder: dict[int, object] = {
+#             20: "<pad>",
+#             21: "<cls>",
+#             22: "<eos>",
+#             23: "<mask>",
+#         }
 
-    @property
-    def vocab_size(self) -> int:
-        return len(self.vocab)
+#     @property
+#     def vocab_size(self) -> int:
+#         return len(self.vocab)
 
-    def encode(self, sequence: str) -> list[int]:
-        """Encode with CLS/EOS wrapping, like EsmSequenceTokenizer."""
-        ids = [self.cls_token_id]
-        ids.extend(self.vocab.get(c, self.pad_token_id) for c in sequence)
-        ids.append(self.eos_token_id)
-        return ids
+#     def encode(self, sequence: str) -> list[int]:
+#         """Encode with CLS/EOS wrapping, like EsmSequenceTokenizer."""
+#         ids = [self.cls_token_id]
+#         ids.extend(self.vocab.get(c, self.pad_token_id) for c in sequence)
+#         ids.append(self.eos_token_id)
+#         return ids
 
-    def decode(self, ids: list[int]) -> str:
-        return "".join(self._idx_to_token.get(i, "?") for i in ids)
+#     def decode(self, ids: list[int]) -> str:
+#         return "".join(self._idx_to_token.get(i, "?") for i in ids)
 
+#     def __call__(self, sequence, padding=True, return_tensor="pt"):
+#         encoded_ids = [self.encode(sequence)
+
+from esm.tokenization.sequence_tokenizer import EsmSequenceTokenizer
+
+FakeTokenizer = EsmSequenceTokenizer
 
 # ---------------------------------------------------------------------------
 # Concrete TransitionModel children — mirror the ESM pattern:
 #   super().__init__(tokenizer=..., logit_formatter=...)
 # ---------------------------------------------------------------------------
 
-VOCAB_SIZE = 24  # 20 AA + 4 special
-OUTPUT_DIM = 32  # like ESM's 64-dim padded output
+VOCAB_SIZE = 33  # 20 AA + 4 special
+OUTPUT_DIM = 64  # like ESM's 64-dim padded output
 
 
 class StubTransitionModel(TransitionModel):

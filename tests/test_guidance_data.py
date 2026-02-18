@@ -1,5 +1,6 @@
 """Tests for guidance.data module."""
 
+import torch
 import numpy as np
 import pytest
 
@@ -42,7 +43,9 @@ class TestGuidanceDataset:
         )
 
         item = dataset[0]
-        assert "sequence" not in item  # GuidanceDataset __getitem__ doesn't return 'sequence' anymore, check code
+        assert (
+            "sequence" not in item
+        )  # GuidanceDataset __getitem__ doesn't return 'sequence' anymore, check code
         assert "input" in item
         assert "labels" in item
         # assert item["sequence"] == "MVLSPADKTN" # Removed from __getitem__
