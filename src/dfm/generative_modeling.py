@@ -10,15 +10,23 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from transformers import PreTrainedTokenizerBase
-from typing import Protocol, runtime_checkable, Optional
+from typing import Protocol, runtime_checkable, Optional, Callable, Dict, List
+from contextlib import contextmanager
 from abc import ABC, abstractmethod
 
 
 # TODO[pi] add a DFM Protocol and Base Class which defines a score method which returns logits for each positions and makes sure to do things like force register token probs to themselves and regular tokens to only be regular tokens, etc. Actually give it a fix register tokens method and allow child classes to specify those token ids and output indices in the init to make it easy. Maybe the model output formatter is a general thing that's defined ... -- like what's the best way to spec the output_dim of ESM models??
 
+TransitionFunc = Callable[
+    torch.LongTensor, torch.FloatTensor
+]  # takes in sequence outputs log_probs
+
 
 class TransitionModel(nn.Module, ABC):
-    """Standard interface for wrapping models for DFM sampling and guidance.
+    """
+    Standard interface for wrapping models for DFM sampling and guidance.
+    NOTE that for our sampling interfaces to work, you must include the
+    tokenizer in the model as an instance variable.
 
     Child classes must implement ``forward`` and pass a tokenizer and logit
     formatter to ``super().__init__``.  For most use-cases
@@ -57,18 +65,146 @@ class TransitionModel(nn.Module, ABC):
     def device(self):
         return next(self.parameters()).device
 
-    def forward_from_string(self, sequences: list[str]):
+    def log_probs_from_string(
+        self, sequences: list[str]
+    ):  # TODO[pi] check all the types hints in the src folder
         tokenized = self.tokenizer(sequences, padding=True, return_tensors="pt")
+        # TODO[pi]
         seq_SP = tokenized["input_ids"].to(device=self.device, dtype=torch.long)
         print(seq_SP)
-        return self.forward(seq_SP)
+        return self.get_transition_log_probs_fn()(seq_SP)
 
-    def get_transition_log_probs_fn(self):
+    def get_transition_log_probs_fn(self) -> TransitionFunc:
         def calc_log_probs(seq_SP: torch.LongTensor):
             logits_SPT = self.forward(seq_SP)
             logits_SPT = self.logit_formatter(logits_SPT, seq_SP)
             logp_seq_SPT = F.log_softmax(logits_SPT, dim=2)
             return logp_seq_SPT
+
+        return calc_log_probs
+
+
+"""
+An alternative design could even be to have stacks of conditioning variables
+so the user could marginalize or condition on things dynamically, but
+this seems like overkill as I'm not sure many people would benefit from such a
+feature right now
+
+from abc import ABC, abstractmethod
+from contextlib import contextmanager
+from collections import ChainMap
+
+
+class Conditionable:
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._condition_stack = []
+
+    @property
+    def condition(self):
+        # merged view of all active conditions
+        if not self._condition_stack:
+            return {}
+        return dict(ChainMap(*reversed(self._condition_stack)))
+
+    @contextmanager
+    def conditioned_on(self, **kwargs):
+        self._condition_stack.append(kwargs)
+        try:
+            yield self
+        finally:
+            self._condition_stack.pop()    
+"""
+
+
+class ConditionalTransitionModel(TransitionModel):
+    """
+    For these models, we expect the get_transition_log_probs_fn to return
+    two different calc_log_probs methods depending on if the model is being
+    called conditionally or not, but this is totally up to the user.
+
+    Users of the library implementing this ABC normally will just need to
+    implement a collator for the dictionary of observation lists--which
+    will be needed for use with the datasets anyways--and the init and
+    forward functions, just like for any other nn.Module subclass.
+
+    Note that if unconditional inference requires some observations, those
+    can be set as the initial value of observations in the init function
+    and the context managers will automatically revert back to it when
+    all conditioning contexts have been exited
+    """
+
+    def __init__(
+        self, tokenizer: PreTrainedTokenizerBase, logit_formatter: LogitFormatter
+    ):
+        super().__init__()
+        self.tokenizer = tokenizer
+        self.logit_formatter = logit_formatter
+        self.observations: Optional[Dict] = None
+
+    @staticmethod
+    @abstractmethod
+    def observation_collator(observations: Dict[List]) -> Dict[torch.Tensor]:
+        """
+        Converts the observations into the proper form to be input to
+        the forward function.
+        """
+        pass
+
+    @abstractmethod
+    def forward(self, seq_SP: torch.LongTensor, **kwargs) -> torch.FloatTensor:
+        """
+        Returns Logits. Note the only difference is the introduction of kwargs
+        TODO[pi] should we consider adding kwargs to the regular forward??
+        I feel like we shouldn't? It kind of breaks the spirit of the unconditional model?
+        """
+        pass
+
+    # TODO[pi] actually, however this is done should be consistent with the bayes rule thing, so conditioning
+    # should change the transition model so that the get_transition_log_prob_fn changes or so that it returns
+    # a new, appropriate object. The downside is that each version will have its own copy of the parameters
+    # which is so stupid...
+    # TODO[pi] add an underscore to anything not meant to be a public interface
+    @contextmanager
+    def conditioned_on(self, observations: Dict) -> TransitionModel:
+        """
+        The ``conditioned_on`` method modifies the` state of the instantiated
+        objected so that the calc_log_probs function returned by the class is actually
+        a conditional probability distribution according to the label information
+        provided here as input.
+
+        The ``get_transition_log_probs_fn`` then uses this instance variable to create the
+        correct ``calc_log_probs`` function.
+
+        In order to convert the raw observation dictionary
+        """
+        pre_context_obs = self.observations
+        self.observations = observations
+        try:
+            yield self
+        finally:
+            self.observations = pre_context_obs
+
+    def get_transition_log_probs_fn(self) -> TransitionFunc:
+        def calc_log_probs(seq_SP: torch.LongTensor):
+            if self.observations is not None:
+                batch_size = seq_SP.size(0)
+                tiled_obs = {k: [v] * batch_size for k, v in self.observations.items()}
+                obs_dict = self.__class__.observation_collator(tiled_obs)
+                logits_SPT = self.forward(seq_SP, **obs_dict)
+            else:
+                try:
+                    logits_SPT = self.forward(seq_SP)
+                except TypeError as e:
+                    # TODO[pi] can you fix this so that it correctly displays the type error and hints that it might be because unconditional inference is not supported?
+                    print(e)
+                    raise NotImplementedError(
+                        f"Unconditional inference is not supported for {self.__class__.__name__}"
+                    )
+            logits_SPT = self.logit_formatter(logits_SPT, seq_SP)
+            logp_seq_SPT = F.log_softmax(logits_SPT, dim=2)
+            return logp_seq_SPT
+
         return calc_log_probs
 
 
@@ -125,7 +261,7 @@ class PassThroughLogitFormatter(LogitFormatter):
         return logits.float()
 
 
-class MaskedModelLogitFomatter(nn.Module, LogitFormatter):
+class MaskedModelLogitFormatter(nn.Module, LogitFormatter):
     """Enforces output constraints for masked language models via additive masking.
 
     Builds a static mask matrix of shape (Ti, To) that defines which output tokens
@@ -186,7 +322,9 @@ class MaskedModelLogitFomatter(nn.Module, LogitFormatter):
 
         # Except for mask which maps to any non-special token
         valid_output_mask_TiTo[mask_token_idx, mask_token_idx] = BLOCK_OUT
-        valid_mask_outputs = set(range(self.output_dim))
+        valid_mask_outputs = set(
+            range(self.tokenizer.vocab_size)
+        )  # TODO[pi] we can just get rid of output_dim from this class at this point
         for idx in self.tokenizer.added_tokens_decoder.keys():
             valid_mask_outputs.discard(idx)
         for idx in valid_mask_outputs:

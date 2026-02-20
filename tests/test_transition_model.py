@@ -13,7 +13,7 @@ from dfm.generative_model import (
     TransitionModel,
     LogitFormatter,
     PassThroughLogitFormatter,
-    MaskedModelLogitFomatter,
+    MaskedModelLogitFormatter,
 )
 
 
@@ -327,7 +327,9 @@ class TestFormatLogitsIntegration:
     @pytest.fixture
     def esm_like_model(self, tokenizer):
         """Model using MaskedModelLogitFomatter, like the real ESM class."""
-        formatter = MaskedModelLogitFomatter(tokenizer, "<mask>", output_dim=OUTPUT_DIM)
+        formatter = MaskedModelLogitFormatter(
+            tokenizer, "<mask>", output_dim=OUTPUT_DIM
+        )
         return StubTransitionModel(
             tokenizer=tokenizer, logit_formatter=formatter, output_dim=OUTPUT_DIM
         )
@@ -386,7 +388,7 @@ class TestFormatLogitsIntegration:
 
     def test_logit_formatter_is_accessible(self, esm_like_model):
         assert isinstance(esm_like_model.logit_formatter, LogitFormatter)
-        assert isinstance(esm_like_model.logit_formatter, MaskedModelLogitFomatter)
+        assert isinstance(esm_like_model.logit_formatter, MaskedModelLogitFormatter)
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +435,9 @@ class TestModuleIntegration:
     def test_formatter_submodule_device_propagation(self, tokenizer):
         """When logit_formatter is an nn.Module (like MaskedModelLogitFomatter),
         registering it as a submodule lets .to(device) propagate buffers."""
-        formatter = MaskedModelLogitFomatter(tokenizer, "<mask>", output_dim=OUTPUT_DIM)
+        formatter = MaskedModelLogitFormatter(
+            tokenizer, "<mask>", output_dim=OUTPUT_DIM
+        )
 
         class ModuleFormatterModel(TransitionModel):
             def __init__(self):
@@ -447,4 +451,4 @@ class TestModuleIntegration:
 
         m = ModuleFormatterModel()
         child_types = [type(c) for c in m.children()]
-        assert MaskedModelLogitFomatter in child_types
+        assert MaskedModelLogitFormatter in child_types

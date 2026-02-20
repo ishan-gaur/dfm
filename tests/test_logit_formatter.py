@@ -4,7 +4,7 @@ import torch
 import pytest
 from torch.nn import functional as F
 
-from dfm.generative_model import MaskedModelLogitFomatter, LogitFormatter
+from dfm.generative_model import MaskedModelLogitFormatter, LogitFormatter
 
 # ---------------------------------------------------------------------------
 # Constants — mask token strings per tokenizer
@@ -34,17 +34,17 @@ def bert_tokenizer():
 
 @pytest.fixture
 def esm_formatter(esm_tokenizer):
-    return MaskedModelLogitFomatter(esm_tokenizer, ESM_MASK_TOKEN)
+    return MaskedModelLogitFormatter(esm_tokenizer, ESM_MASK_TOKEN)
 
 
 @pytest.fixture
 def esm_formatter_64(esm_tokenizer):
-    return MaskedModelLogitFomatter(esm_tokenizer, ESM_MASK_TOKEN, output_dim=64)
+    return MaskedModelLogitFormatter(esm_tokenizer, ESM_MASK_TOKEN, output_dim=64)
 
 
 @pytest.fixture
 def bert_formatter(bert_tokenizer):
-    return MaskedModelLogitFomatter(bert_tokenizer, BERT_MASK_TOKEN)
+    return MaskedModelLogitFormatter(bert_tokenizer, BERT_MASK_TOKEN)
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +93,7 @@ class TestConstruction:
 
     def test_output_dim_too_small_raises(self, esm_tokenizer):
         with pytest.raises(AssertionError):
-            MaskedModelLogitFomatter(esm_tokenizer, ESM_MASK_TOKEN, output_dim=10)
+            MaskedModelLogitFormatter(esm_tokenizer, ESM_MASK_TOKEN, output_dim=10)
 
     def test_satisfies_protocol(self, esm_formatter):
         assert isinstance(esm_formatter, LogitFormatter)
@@ -147,9 +147,7 @@ class TestMaskMatrix:
             finite_positions = torch.isfinite(row).nonzero(as_tuple=True)[0].tolist()
             assert finite_positions == [idx]
 
-    def test_bert_mask_token_maps_to_non_special(
-        self, bert_formatter, bert_tokenizer
-    ):
+    def test_bert_mask_token_maps_to_non_special(self, bert_formatter, bert_tokenizer):
         """Same mask-row constraint holds for BERT tokenizer."""
         matrix = bert_formatter.valid_output_mask_TiTo
         mask_id = _mask_token_id(bert_tokenizer, BERT_MASK_TOKEN)
@@ -261,10 +259,12 @@ class TestForward:
     def test_batch_dimension(self, esm_formatter, esm_tokenizer):
         """Should work with batched inputs."""
         mask_id = _mask_token_id(esm_tokenizer, ESM_MASK_TOKEN)
-        seq = torch.tensor([
-            [0, 5, 23, mask_id, 2],
-            [0, mask_id, mask_id, 10, 2],
-        ])
+        seq = torch.tensor(
+            [
+                [0, 5, 23, mask_id, 2],
+                [0, mask_id, mask_id, 10, 2],
+            ]
+        )
         logits = torch.randn(2, 5, esm_tokenizer.vocab_size)
         out = esm_formatter(logits, seq)
         assert out.shape == (2, 5, esm_tokenizer.vocab_size)
@@ -316,7 +316,7 @@ class TestDeviceTracking:
         class DummyModel(torch.nn.Module):
             def __init__(self):
                 super().__init__()
-                self.formatter = MaskedModelLogitFomatter(
+                self.formatter = MaskedModelLogitFormatter(
                     esm_tokenizer, ESM_MASK_TOKEN
                 )
 

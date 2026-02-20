@@ -1,5 +1,6 @@
 # Guidance
 
+# TODO[pi] integrate with https://github.com/COLA-Laboratory/GraphFLA to get the different fitness landscapes
 A minimal library for protein sequence guidance using conditional generative models.
 
 ## References

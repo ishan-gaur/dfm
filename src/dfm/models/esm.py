@@ -1,8 +1,8 @@
 import torch
 from torch.nn import functional as F
-from dfm.generative_model import (
+from dfm.generative_modeling import (
     TransitionModel,
-    MaskedModelLogitFomatter,
+    MaskedModelLogitFormatter,
     LogitFormatter,
 )
 from transformers import PreTrainedTokenizerBase
@@ -11,7 +11,7 @@ from esm.tokenization.sequence_tokenizer import EsmSequenceTokenizer
 
 OUTPUT_DIM = 64
 TOKENIZER = EsmSequenceTokenizer()
-MASKED_FORMATTER = MaskedModelLogitFomatter(TOKENIZER, "<mask>", OUTPUT_DIM)
+MASKED_FORMATTER = MaskedModelLogitFormatter(TOKENIZER, "<mask>", OUTPUT_DIM)
 
 
 class ESM(TransitionModel):
