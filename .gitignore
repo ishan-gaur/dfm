@@ -11,4 +11,5 @@ wheels/
 
 # wandb
 wandb/
-tyrosine_kinase/checkpoints/
+
+scripts/stability_guidance_demo/weights/ scripts/stability_guidance_demo/data/
