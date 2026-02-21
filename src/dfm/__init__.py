@@ -14,6 +14,8 @@ from .generative_modeling import (
     MaskedModelLogitFormatter,
 )
 
+from .predictive_model import PredictiveModel, LinearProbe
+
 from .sampling import sample_any_order_ancestral
 
 

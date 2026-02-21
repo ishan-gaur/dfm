@@ -76,14 +76,16 @@ class TAG(TransitionModel):
         # ah, just make the predictive model specify its own tokenizer too--normally just the same as the predictive model
         # generally for these predictors, you'll have a OHE at somepoint and you want to make that as a leaf and return it
         with torch.enable_grad():
-            ohe_seq_SPT = F.one_hot(
-                seq_SP, num_classes=self.gen_model.logit_formatter.output_dim
-            ).requires_grad_(True)
+            ohe_seq_SPT = (
+                F.one_hot(seq_SP, num_classes=self.gen_model.logit_formatter.output_dim)
+                .float()
+                .requires_grad_(True)
+            )
             # TODO[pi] we can automatically generate the str_to_ohe function based on the tokenizer in the PredictiveModel
             # ohe_seq_SPT = self.pred_model.str_to_ohe(str_seq_SP).requires_grad_(True)
             ohe_seq_SPT.grad.zero_()
             # The conversion is done separately so that the gradients accumulate in the generative model's token space
-            logp_y_g_x_S = self.pred_model(
+            logp_y_g_x_S = self.pred_model.target_log_probs_given_ohe(
                 self.gen_to_pred_space(ohe_seq_SPT)
             )  # TODO[pi] the user should set the class/threshold so this doesn't logpy_g_x_SC
             logp_y_g_x_S.sum().backward()
@@ -108,11 +110,6 @@ class DEG(TransitionModel):
         self.tokenizer = self.gen_model.tokenizer
 
         self.pred_model = pred_model
-        self.gen_to_pred_space = TokenizerTranslator(
-            self.tokenizer,
-            self.pred_model.tokenizer,
-            self.pred_model.input_dim,  # TODO[pi] need to add this to the ABC
-        )
         self.positions_to_score_S = None
 
     # TODO[pi] with all these different things we have to mix in, I'm wondering if
@@ -145,12 +142,9 @@ class DEG(TransitionModel):
             # logitformatter mask in order to only try the valid transitions here
             seq_XP = (
                 seq_SP[s].unsqueeze(0).repeat(n_tok, 1)
-            )  # X is the number of tokens we're trying
+            )  # X is the index over tokens we're trying
             seq_XP[:, p] = torch.arange(n_tok)
-            ohe_seq_XPT = self.gen_to_pred_space(
-                F.one_hot(seq_XP, num_classes=self.gen_model.logit_formatter.output_dim)
-            )
-            logp_y_g_xtilde_X = self.pred_model(ohe_seq_XPT)
+            logp_y_g_xtilde_X = self.pred_model.target_log_probs_given_seq(seq_XP)
             logp_y_g_xtilde_SPT[s, p, :n_tok] = logp_y_g_xtilde_X
             # Don't need to take care of making the others -inf since the logit_formatter will take care of the invalid ones (including the invalid ones we tested lol)
         return logp_y_g_xtilde_SPT + logp_xtilde_g_x_SPT

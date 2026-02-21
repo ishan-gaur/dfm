@@ -1,9 +1,11 @@
 import torch
 from dfm.generative_modeling import (
     TransitionModel,
+    ConditionalTransitionModel,
     MaskedModelLogitFormatter,
     LogitFormatter,
 )
+from dfm.predictive_modeling import PreTrainedEmbeddingModel
 from transformers import PreTrainedTokenizerBase
 from esm.models.esmc import ESMC
 from esm.tokenization.sequence_tokenizer import EsmSequenceTokenizer
@@ -13,7 +15,7 @@ TOKENIZER = EsmSequenceTokenizer()
 MASKED_FORMATTER = MaskedModelLogitFormatter(TOKENIZER, "<mask>", OUTPUT_DIM)
 
 
-class ESM(TransitionModel):
+class ESMC(TransitionModel):
     """
     Tensor Index Legend
     S: sequence index in batch
@@ -35,3 +37,7 @@ class ESM(TransitionModel):
         logits_SPT = self.model(seq_SP).sequence_logits.float()
         assert logits_SPT.shape[2] == OUTPUT_DIM, "OUTPUT_DIM constant is wrong"
         return logits_SPT
+
+
+class ESMIF(ConditionalTransitionModel, PreTrainedEmbeddingModel):
+    pass

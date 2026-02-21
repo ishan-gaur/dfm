@@ -24,6 +24,22 @@ Main types:
     - So we need to adjust ESM accordingly if it is to be a backbone for linear probes
         (linear probs will take an "embed" function as input, which will be the ESM embedding for ESM, etc.)
 
+DUMP OF BIG PICTURE TODOS:
+
+Where do we store models? Only use ones on HF??
+- PMPNN, ESMC, ESM3, 
+
+Think we should implement the paper experiments--or at least the tricks needed to make them work
+We should also make it easy to do diagnostics like check the likelihoods
+We should also include code to use FT so it's easy for people to do
+And we can make our recommendation to do both or at least do partial unmasked generation
+
+I should've maybe made it so that you could use HF models no???
+I guess you can--just have to wrap them with a transition model--which is just adding a logitformatter
+That would be the real win
+How do packages get there--maybe ask Tristan
+
+
 
 DATASET:
 # Guidance dataset build on top of regular model training dataset, which is linked to its sampler

@@ -1,13 +1,13 @@
 import torch
 import pytest
-from dfm.models.esm import ESM
+from dfm.models.esm import ESMC
 from esm.models.esmc import ESMC
 
 
 @pytest.fixture
 def model():
     # Use the default checkpoint as per code, assuming environment can handle it
-    m = ESM()
+    m = ESMC()
     # Ensure all submodules (including buffers in logit_formatter) are on the same device
     # ESMC loads to CUDA by default if available, but logit_formatter (global) starts on CPU.
     m.to(m.device)

@@ -200,6 +200,10 @@ class ConditionalTransitionModel(TransitionModel):
     def set_condition_(self, observations: Dict):
         self.observations = observations
 
+    def set_condition(self, observations: Dict) -> ConditionalTransitionModel:
+        self.observations = observations
+        return self
+
     def transition_log_probs(
         self, seq_SP: torch.LongTensor, temp: float = 1.0
     ) -> torch.FloatTensor:
