@@ -55,6 +55,7 @@ class TransitionModel(nn.Module, ABC):
         super().__init__()
         self.tokenizer = tokenizer
         self.logit_formatter = logit_formatter
+        self.temp = 1.0
 
     @abstractmethod
     def forward(self, seq_SP: torch.LongTensor) -> torch.FloatTensor:
@@ -71,17 +72,30 @@ class TransitionModel(nn.Module, ABC):
         tokenized = self.tokenizer(sequences, padding=True, return_tensors="pt")
         # TODO[pi]
         seq_SP = tokenized["input_ids"].to(device=self.device, dtype=torch.long)
-        print(seq_SP)
         return self.get_transition_log_probs_fn()(seq_SP)
 
-    def get_transition_log_probs_fn(self) -> TransitionFunc:
-        def calc_log_probs(seq_SP: torch.LongTensor):
-            logits_SPT = self.forward(seq_SP)
-            logits_SPT = self.logit_formatter(logits_SPT, seq_SP)
-            logp_seq_SPT = F.log_softmax(logits_SPT, dim=2)
-            return logp_seq_SPT
+    @contextmanager
+    def with_temp(self, temp: float) -> TransitionModel:
+        """
+        The ``with_temp`` method modifies the state of the instantiated
+        objecte so that the transition_log_probs function returned by the class is
+        computed from the logits using the specified temperature.
+        """
+        pre_context_temp = self.temp
+        self.temp = temp
+        try:
+            yield self
+        finally:
+            self.temp = pre_context_temp
 
-        return calc_log_probs
+    def set_temp_(self, temp: float):
+        self.temp = temp
+
+    def transition_log_probs(self, seq_SP: torch.LongTensor) -> torch.FloatTensor:
+        logits_SPT = self.forward(seq_SP)
+        logits_SPT = self.logit_formatter(logits_SPT, seq_SP)
+        logp_seq_SPT = F.log_softmax(logits_SPT / self.temp, dim=2)
+        return logp_seq_SPT
 
 
 """
@@ -137,9 +151,7 @@ class ConditionalTransitionModel(TransitionModel):
     def __init__(
         self, tokenizer: PreTrainedTokenizerBase, logit_formatter: LogitFormatter
     ):
-        super().__init__()
-        self.tokenizer = tokenizer
-        self.logit_formatter = logit_formatter
+        super().__init__(tokenizer, logit_formatter)
         self.observations: Optional[Dict] = None
 
     @staticmethod
@@ -185,27 +197,29 @@ class ConditionalTransitionModel(TransitionModel):
         finally:
             self.observations = pre_context_obs
 
-    def get_transition_log_probs_fn(self) -> TransitionFunc:
-        def calc_log_probs(seq_SP: torch.LongTensor):
-            if self.observations is not None:
-                batch_size = seq_SP.size(0)
-                tiled_obs = {k: [v] * batch_size for k, v in self.observations.items()}
-                obs_dict = self.__class__.observation_collator(tiled_obs)
-                logits_SPT = self.forward(seq_SP, **obs_dict)
-            else:
-                try:
-                    logits_SPT = self.forward(seq_SP)
-                except TypeError as e:
-                    # TODO[pi] can you fix this so that it correctly displays the type error and hints that it might be because unconditional inference is not supported?
-                    print(e)
-                    raise NotImplementedError(
-                        f"Unconditional inference is not supported for {self.__class__.__name__}"
-                    )
-            logits_SPT = self.logit_formatter(logits_SPT, seq_SP)
-            logp_seq_SPT = F.log_softmax(logits_SPT, dim=2)
-            return logp_seq_SPT
+    def set_condition_(self, observations: Dict):
+        self.observations = observations
 
-        return calc_log_probs
+    def transition_log_probs(
+        self, seq_SP: torch.LongTensor, temp: float = 1.0
+    ) -> torch.FloatTensor:
+        if self.observations is not None:
+            batch_size = seq_SP.size(0)
+            tiled_obs = {k: [v] * batch_size for k, v in self.observations.items()}
+            obs_dict = self.__class__.observation_collator(tiled_obs)
+            logits_SPT = self.forward(seq_SP, **obs_dict)
+        else:
+            try:
+                logits_SPT = self.forward(seq_SP)
+            except TypeError as e:
+                # TODO[pi] can you fix this so that it correctly displays the type error and hints that it might be because unconditional inference is not supported?
+                print(e)
+                raise NotImplementedError(
+                    f"Unconditional inference is not supported for {self.__class__.__name__}"
+                )
+        logits_SPT = self.logit_formatter(logits_SPT, seq_SP)
+        logp_seq_SPT = F.log_softmax(logits_SPT / self.temp, dim=2)
+        return logp_seq_SPT
 
 
 @runtime_checkable
@@ -248,6 +262,14 @@ class LogitFormatter(Protocol):
         - **Loss-side only**: don't constrain logits at all; mask the loss instead
           and trust the model learns the constraints. No guarantees at inference.
     """
+
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        output_dim: Optional[int] = None,
+    ):
+        self.tokenizer = tokenizer
+        self.output_dim = output_dim
 
     def __call__(
         self, logits: torch.Tensor, input_ids: torch.LongTensor
@@ -293,7 +315,6 @@ class MaskedModelLogitFormatter(nn.Module, LogitFormatter):
     def __init__(
         self,
         tokenizer: PreTrainedTokenizerBase,
-        mask_token: str,
         output_dim: Optional[int] = None,
     ):
 
@@ -318,7 +339,8 @@ class MaskedModelLogitFormatter(nn.Module, LogitFormatter):
         # All tokens map to themselves
         for idx in self.tokenizer.vocab.values():
             valid_output_mask_TiTo[idx, idx] = PASS_THROUGH
-        mask_token_idx = self.tokenizer.vocab[mask_token]
+        # mask_token_idx = self.tokenizer.vocab[mask_token]
+        mask_token_idx = self.tokenizer.mask_token_id
 
         # Except for mask which maps to any non-special token
         valid_output_mask_TiTo[mask_token_idx, mask_token_idx] = BLOCK_OUT

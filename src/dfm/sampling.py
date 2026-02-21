@@ -9,13 +9,12 @@ SamplingStep = Callable[
     [torch.FloatTensor, Optional[List[float]]],
 ]  # takes in transition kernel and current state and returns updated state. List of floats is the list of timepoints.
 
-Sampler = Callable[
+Integrator = Callable[
     [TransitionModel, List[str]], List[str]
 ]  # Takes in transition model, tokenizes the input and then runs sampling to completion; this will need other args for e.g. uniform sampling
 
 
 def sample_any_order_ancestral(model: TransitionModel, x_SP: torch.LongTensor):
-    transition_fn = model.get_transition_log_probs_fn()
     mask_token_id = model.tokenizer.mask_token_id
     pad_token_id = model.tokenizer.pad_token_id
 
@@ -31,7 +30,7 @@ def sample_any_order_ancestral(model: TransitionModel, x_SP: torch.LongTensor):
 
     t = t_st
     while t != t_end:
-        x_SP = any_order_ancestral_step(transition_fn, x_SP, mask_token_id)
+        x_SP = any_order_ancestral_step(model.transition_log_probs, x_SP, mask_token_id)
         len_S = x_SP.size(1) - (x_SP == pad_token_id).sum(dim=1)
         t_S = 1 - (x_SP == mask_token_id).sum(dim=1) / len_S
         t_new = t_S.min().item()
@@ -43,7 +42,7 @@ def sample_any_order_ancestral(model: TransitionModel, x_SP: torch.LongTensor):
 
 
 def any_order_ancestral_step(
-    transition_log_prob_fn: TransitionFunc,
+    transition_log_prob_fn: TransitionFunc,  # is there any reason not to just pass the model here?
     x_SP: torch.LongTensor,
     mask_token_id: int,
     next_pos_idx_SP: Optional[torch.LongTensor] = None,

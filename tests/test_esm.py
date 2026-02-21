@@ -1,7 +1,6 @@
 import torch
 import pytest
 from dfm.models.esm import ESM
-from esm.tokenization.sequence_tokenizer import EsmSequenceTokenizer
 from esm.models.esmc import ESMC
 
 
@@ -168,14 +167,13 @@ def test_batching(model):
     - Batched forward approx individual forward passes
     """
     seq1 = "ACDEF"
-    seq2 = "GHACC" # TODO make this shorter again
+    seq2 = "GHACC"  # TODO make this shorter again
 
     batch_out = model.forward_from_string([seq1, seq2])
 
     out1 = model.forward_from_string([seq1])
     out2 = model.forward_from_string([seq2])
 
-    from torch.nn import functional as F
     # assert torch.allclose(batch_out[0], out1[0], atol=1)
     assert torch.allclose(batch_out[0], out1[0], atol=1)
     len2 = out2.shape[1]

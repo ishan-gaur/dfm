@@ -1,0 +1,9 @@
+- [ ] Guided sampling x
+- [ ] Need to support individual and total temperatures--perhaps via the sampling method
+- [ ] Classifier training script
+    - [ ] Dataset interface with collators
+    - [ ] Add a classifier to the predictive models
+- [ ] Guided sampling
+- [ ] TAG
+    - Euler integrator
+- [ ] Conditional Model Example

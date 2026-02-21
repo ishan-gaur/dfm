@@ -1,1 +1,1 @@
-from .esm import ESM
+from .esm import ESM as ESM

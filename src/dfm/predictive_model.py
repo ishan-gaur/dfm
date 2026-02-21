@@ -3,6 +3,10 @@ from torch import nn
 from typing import Callable
 
 
+class PredictiveModel(nn.Module):
+    pass
+
+
 class LinearProbe(nn.Module):
     """
     Linear probe on top of pre-computed embeddings.
