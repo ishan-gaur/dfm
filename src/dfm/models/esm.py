@@ -8,6 +8,8 @@ from dfm.generative_modeling import (
 from dfm.predictive_modeling import PreTrainedEmbeddingModel
 from transformers import PreTrainedTokenizerBase
 from esm.models.esmc import ESMC
+from esm.models.esm3 import ESM3
+from esm.utils.residue_constants import atom_order
 from esm.tokenization.sequence_tokenizer import EsmSequenceTokenizer
 
 OUTPUT_DIM = 64
@@ -32,6 +34,7 @@ class ESMC(TransitionModel):
         # the forward calls and runs formatter
         super().__init__(tokenizer, logit_formatter)
         self.model = ESMC.from_pretrained(esmc_checkpoint)
+        self.model.eval()
 
     def forward(self, seq_SP: torch.LongTensor):
         logits_SPT = self.model(seq_SP).sequence_logits.float()
@@ -39,5 +42,23 @@ class ESMC(TransitionModel):
         return logits_SPT
 
 
-class ESMIF(ConditionalTransitionModel, PreTrainedEmbeddingModel):
-    pass
+class ESM3IF(ConditionalTransitionModel):
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizerBase = TOKENIZER,
+        logit_formatter: LogitFormatter = MASKED_FORMATTER,
+        esm3_checkpoint: str = "esm3-open",
+    ):
+        # init base model and logit formatter
+        # the forward calls and runs formatter
+        super().__init__(tokenizer, logit_formatter)
+        self.model = ESM3.from_pretrained(esm3_checkpoint)
+        self.model.eval()
+
+    def set_condition(self, observations):
+        raise NotImplementedError()
+
+    def forward(self, seq_SP: torch.LongTensor):
+        raise NotImplementedError()
+
+    # TODO[pi] add embedding

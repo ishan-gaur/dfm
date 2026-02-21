@@ -121,9 +121,10 @@ class ClassValuedPredictiveModel(PredictiveModel, ABC):
 
 
 class PreTrainedEmbeddingModel(nn.Module, ABC):
-    EMB_DIM
+    EMB_DIM = None
     @abstractmethod
-    def forward(self, ohe_seq_SPT: torch.FloatTensor):
+    def forward_ohe(self, ohe_seq_SPT: torch.FloatTensor) -> (torch.FloatTensor, torch.FloatTensor):
+        # returns both the log probs and embeddings
         pass
 
 
