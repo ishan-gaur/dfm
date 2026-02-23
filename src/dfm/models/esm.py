@@ -61,19 +61,17 @@ class ESM3IF(TransitionModel):
             model=esmc, tokenizer=tokenizer, logit_formatter=logit_formatter
         )
 
-    # TODO[pi] the collate functions should be static to be used by dataloaders
-    def collate_observations(
-        self, seq_SP: torch.LongTensor, observations: StructureCondition
-    ):
-        # Encode structure to get input tokens (adds cls/eos)
+    def preprocess_observations(self, observations: StructureCondition) -> dict:
+        """Encode structure once (expensive). Cached by set_condition_."""
         coords = observations["coords_RAX"]
+        encoded = self.model.encode(ESMProtein(coordinates=coords))
+        return {"encoded_tokens": encoded}
+
+    def collate_observations(self, seq_SP: torch.LongTensor, observations: dict):
+        """Replicate cached encoded tokens for the batch."""
+        template = observations["encoded_tokens"]
         batch_size = seq_SP.shape[0]
-        return {
-            "input_tokens": [
-                self.model.encode(ESMProtein(coordinates=coords))
-                for _ in range(batch_size)
-            ]
-        }
+        return {"input_tokens": [template] * batch_size}
 
     def forward(self, seq_SP, input_tokens):
         """Forward pass of ESM3 as inverse folding model.

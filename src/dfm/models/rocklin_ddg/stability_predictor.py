@@ -421,102 +421,103 @@ class PMPNNStructureEncoding(TypedDict):
     chain_M: torch.Tensor
 
 
-class PMPNNStructureEncodingCollated(TypedDict):
-    vertex_emb_SPH: torch.Tensor
-    edge_emb_SEH: torch.Tensor
-    E_idx: torch.Tensor
-    attention_mask_SPP: torch.Tensor
-    seq_mask_SP: torch.Tensor
-    chain_M_SP: torch.Tensor
-
-
 class PreTrainedStabilityPredictor(PredictiveModel):
     def __init__(
         self, ckpt_path, vocab_size=21, device="cuda", one_hot_encode_input=False
     ):
+        from dfm.generative_modeling import MPNNTokenizer
+
         model = StabilityPMPNN.init(num_letters=vocab_size, vocab=vocab_size)
         model.load_state_dict(torch.load(ckpt_path, weights_only=False))
         if one_hot_encode_input:
             layer = nn.Linear(vocab_size, 128, bias=False)
             layer.weight.data = model.fm_mpnn.W_s.weight.data.T.clone()
             model.fm_mpnn.W_s = layer
-        super().__init__(
-            model=model, tokenizer=None
-        )  # TODO[pi] pass proper tokenizer so that this works with TAG
+        tokenizer = MPNNTokenizer()
+        super().__init__(model=model, tokenizer=tokenizer)
+        self.input_dim = vocab_size
 
-    def preprocess_observations(self, observations: StabilityPredictorConditioning):
+    @staticmethod
+    def prepare_conditioning(pdb_path, device="cpu") -> StabilityPredictorConditioning:
+        """Load PDB and build conditioning tensors (batch_size=1)."""
+        from dfm.models.rocklin_ddg.data_utils import load_pdb_to_graph_dict, featurize
+
+        graph = load_pdb_to_graph_dict(pdb_path)
+        X, S, mask, lengths, chain_M, residue_idx, mask_self, chain_encoding_all = (
+            featurize([graph], device)
+        )
+        return StabilityPredictorConditioning(
+            X=X,
+            mask=mask,
+            chain_M=chain_M,
+            residue_idx=residue_idx,
+            chain_encoding_all=chain_encoding_all,
+        )
+
+    def preprocess_observations(
+        self, observations: StabilityPredictorConditioning
+    ) -> PMPNNStructureEncoding:
+        device = self.device
+        obs = {
+            k: v.to(device) if isinstance(v, torch.Tensor) else v
+            for k, v in observations.items()
+        }
         with torch.no_grad():
             h_V, h_E, E_idx, mask_attend = self.model.encode_structure(
-                observations["X"],
-                observations["mask"],
-                observations["chain_M"],
-                observations["residue_idx"],
-                observations["chain_encoding_all"],
+                obs["X"],
+                obs["mask"],
+                obs["chain_M"],
+                obs["residue_idx"],
+                obs["chain_encoding_all"],
             )
         return PMPNNStructureEncoding(
             h_V=h_V,
             h_E=h_E,
             E_idx=E_idx,
             mask_attend=mask_attend,
-            mask=observations["mask"],
-            chain_M=observations["chain_M"],
+            mask=obs["mask"],
+            chain_M=obs["chain_M"],
         )
 
-    def collate_observations(xt, observations: PMPNNStructureEncoding):
-        h_V = observations["h_V"]
-        h_E = observations["h_E"]
-        E_idx = observations["E_idx"]
-        mask_attend = observations["mask_attend"]
-        B = xt.shape[0]
-
-        # Replicate pre-encoded structure for batch
-        h_V_rep = h_V[0:1].repeat(B, 1, 1)
-        h_E_rep = h_E[0:1].repeat(B, 1, 1, 1)
-        E_idx_rep = E_idx[0:1].repeat(B, 1, 1)
-        mask_attend_rep = mask_attend[0:1].repeat(B, 1, 1)
-        mask_rep = mask[0:1].repeat(B, 1)
-        chain_M_rep = chain_M[0:1].repeat(B, 1)
-
-        return PMPNNStructureEncodingCollated(
-            vertex_emb_SPH=h_V_rep,
-            edge_emb_SEH=h_E_rep,
-            attention_mask_SPP=mask_attend_rep,
-            seq_mask_SP=mask_rep,
-            chain_M_SP=chain_M_rep,
+    def collate_observations(
+        self, x_B: torch.Tensor, observations: PMPNNStructureEncoding
+    ) -> dict:
+        B = x_B.shape[0]
+        return dict(
+            h_V=observations["h_V"][0:1].expand(B, -1, -1),
+            h_E=observations["h_E"][0:1].expand(B, -1, -1, -1),
+            E_idx=observations["E_idx"][0:1].expand(B, -1, -1),
+            mask_attend=observations["mask_attend"][0:1].expand(B, -1, -1),
+            mask=observations["mask"][0:1].expand(B, -1),
+            chain_M=observations["chain_M"][0:1].expand(B, -1),
         )
 
-        # TODO[pi] check that TAG is handling this conversion correctly
-        # if xt.is_floating_point():
-        # # TAG mode: xt is one-hot (B, D, 33)
-        # # Convert ESM3 one-hot to PMPNN one-hot, preserving gradients
-        # xt_pmpnn = esm_ohe_to_pmpnn_ohe(xt)
-        # else:
-        #     # Integer token mode: xt is (B, D) ESM3 indices
-        #     # Strip cls/eos and convert to PMPNN indices
-        #     xt_pmpnn_idx = esm_tokens_to_pmpnn_tokens_batch(xt)
-        #     xt_pmpnn = F.one_hot(xt_pmpnn_idx, num_classes=len(PMPNN_ALPHABET)).float()
-
-    def forward(
-        self,
-        ohe_seq_SP: torch.FloatTensor,
-        vertex_emb_SPH,
-        edge_emb_SEH,
-        E_idx,
-        attention_mask_SPP,
-        seq_mask_SP,
-        chain_M_SP,
-    ):
-        # NOTE couldn't just set forward to decode due to difference in argument order!
-        logit = self.model.decode(
-            vertex_emb_SPH,
-            edge_emb_SEH,
-            E_idx,
-            ohe_seq_SP,
-            attention_mask_SPP,
-            seq_mask_SP,
-            chain_M_SP,
-        )
+    def forward(self, x_B, *, h_V, h_E, E_idx, mask_attend, mask, chain_M):
+        logit = self.model.decode(h_V, h_E, E_idx, x_B, mask_attend, mask, chain_M)
         return logit
 
-    def format_raw_to_logits(self, logit):
+    def format_raw_to_logits(self, logit, x_B, **kwargs):
         return torch.log(F.sigmoid(logit.reshape(-1)))
+
+    def get_log_probs(self, x_B: torch.Tensor) -> torch.Tensor:
+        """Return log p(stable | x). Scalar per sequence, no log_softmax."""
+        if self.observations is not None:
+            obs = self.collate_observations(x_B, self.observations)
+            raw_output = self.forward(x_B, **obs)
+            return self.format_raw_to_logits(raw_output, x_B, **obs)
+        else:
+            raise ValueError(
+                "StabilityPredictor requires structure conditioning. "
+                "Call set_condition_() first."
+            )
+
+    def target_log_probs_given_ohe(self, ohe_SPV: torch.FloatTensor) -> torch.Tensor:
+        """Return log p(stable | sequence) for TAG guidance.
+
+        Args:
+            ohe_SPV: One-hot encoded sequences in PMPNN space (B, L, V).
+
+        Returns:
+            Log probability of stability, shape (B,).
+        """
+        return self.get_log_probs(ohe_SPV)

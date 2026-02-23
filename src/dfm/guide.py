@@ -22,13 +22,14 @@ class TokenizerTranslator(nn.Module):
         convert_SrcTgt = torch.zeros(tokenizer_src.vocab_size, target_output_dim)
         src_vocab = set(tokenizer_src.vocab.keys())
         tgt_vocab = set(tokenizer_tgt.vocab.keys())
-        if not src_vocab.issubset(tgt_vocab):
+        shared_vocab = src_vocab & tgt_vocab
+        if not shared_vocab:
             raise ValueError(
-                f"Source tokenizer vocab {src_vocab} must be a subset of the target tokenizer vocab {tgt_vocab}"
+                f"Source and target tokenizer vocabs have no tokens in common"
             )
         self.vocab_eq = tgt_vocab.issubset(src_vocab)
 
-        for tok in src_vocab:
+        for tok in shared_vocab:
             i = tokenizer_src.vocab[tok]
             j = tokenizer_tgt.vocab[tok]
             convert_SrcTgt[i, j] = 1.0
@@ -56,12 +57,13 @@ class TAG(TransitionModel):
         gen_model: TransitionModel,
         pred_model: PredictiveModel,
     ):
-        super().__init__()
-        # main stiputation here is that the predictive model has to take OHE as input
+        super().__init__(
+            model=gen_model.model,
+            tokenizer=gen_model.tokenizer,
+            logit_formatter=gen_model.logit_formatter,
+        )
+        # main stipulation here is that the predictive model has to take OHE as input
         self.gen_model = gen_model
-        self.logit_formatter = self.gen_model.logit_formatter
-        self.tokenizer = self.gen_model.tokenizer
-
         self.pred_model = pred_model
         self.gen_to_pred_space = TokenizerTranslator(
             self.tokenizer,
@@ -69,24 +71,35 @@ class TAG(TransitionModel):
             self.pred_model.input_dim,  # TODO[pi] need to add this to the ABC
         )
 
+        # Detect whether gen tokenizer adds CLS/EOS that pred tokenizer doesn't have
+        gen_has_cls = getattr(self.tokenizer, "cls_token_id", None) is not None
+        gen_has_eos = getattr(self.tokenizer, "eos_token_id", None) is not None
+        pred_has_cls = getattr(self.pred_model.tokenizer, "cls_token_id", None) is not None
+        pred_has_eos = getattr(self.pred_model.tokenizer, "eos_token_id", None) is not None
+        self._strip_prefix = 1 if (gen_has_cls and not pred_has_cls) else 0
+        self._strip_suffix = 1 if (gen_has_eos and not pred_has_eos) else 0
+
     def forward(
         self, seq_SP: torch.LongTensor
     ):  # seq_SP is assumed to be natively tokenized for the generative model
-        logp_xtilde_g_x_SPT = self.gen_model.transition_log_probs(seq_SP)
-        # ah, just make the predictive model specify its own tokenizer too--normally just the same as the predictive model
-        # generally for these predictors, you'll have a OHE at somepoint and you want to make that as a leaf and return it
+        logp_xtilde_g_x_SPT = self.gen_model.get_log_probs(seq_SP)
         with torch.enable_grad():
             ohe_seq_SPT = (
                 F.one_hot(seq_SP, num_classes=self.gen_model.logit_formatter.output_dim)
                 .float()
                 .requires_grad_(True)
             )
-            # TODO[pi] we can automatically generate the str_to_ohe function based on the tokenizer in the PredictiveModel
-            # ohe_seq_SPT = self.pred_model.str_to_ohe(str_seq_SP).requires_grad_(True)
-            ohe_seq_SPT.grad.zero_()
+            # Strip CLS/EOS positions if gen and pred tokenizers disagree
+            if self._strip_suffix > 0:
+                ohe_inner = ohe_seq_SPT[:, self._strip_prefix : -self._strip_suffix, :]
+            elif self._strip_prefix > 0:
+                ohe_inner = ohe_seq_SPT[:, self._strip_prefix :, :]
+            else:
+                ohe_inner = ohe_seq_SPT
+
             # The conversion is done separately so that the gradients accumulate in the generative model's token space
             logp_y_g_x_S = self.pred_model.target_log_probs_given_ohe(
-                self.gen_to_pred_space(ohe_seq_SPT)
+                self.gen_to_pred_space(ohe_inner)
             )  # TODO[pi] the user should set the class/threshold so this doesn't logpy_g_x_SC
             logp_y_g_x_S.sum().backward()
             logp_y_g_xtilde_SPT = ohe_seq_SPT.grad
@@ -103,12 +116,13 @@ class DEG(TransitionModel):
         gen_model: TransitionModel,
         pred_model: PredictiveModel,
     ):
-        super().__init__()
+        super().__init__(
+            model=gen_model.model,
+            tokenizer=gen_model.tokenizer,
+            logit_formatter=gen_model.logit_formatter,
+        )
         # main stipulation here is that the predictive model has to take OHE as input
         self.gen_model = gen_model
-        self.logit_formatter = self.gen_model.logit_formatter
-        self.tokenizer = self.gen_model.tokenizer
-
         self.pred_model = pred_model
         self.positions_to_score_S = None
 
@@ -132,7 +146,7 @@ class DEG(TransitionModel):
             raise ValueError(
                 "Need to call ``self.at_position(positions_to_score_S)`` to provide the position to score for each sequence"
             )
-        logp_xtilde_g_x_SPT = self.gen_model.transition_log_probs(seq_SP)
+        logp_xtilde_g_x_SPT = self.gen_model.get_log_probs(seq_SP)
         logp_y_g_xtilde_SPT = torch.zeros_like(logp_xtilde_g_x_SPT)
         n_tok = self.tokenizer.vocab_size
         for s, p in enumerate(self.positions_to_score_S):
@@ -144,7 +158,7 @@ class DEG(TransitionModel):
                 seq_SP[s].unsqueeze(0).repeat(n_tok, 1)
             )  # X is the index over tokens we're trying
             seq_XP[:, p] = torch.arange(n_tok)
-            logp_y_g_xtilde_X = self.pred_model.target_log_probs_given_seq(seq_XP)
+            logp_y_g_xtilde_X = self.pred_model.get_log_prob_target_from_seq(seq_XP)
             logp_y_g_xtilde_SPT[s, p, :n_tok] = logp_y_g_xtilde_X
             # Don't need to take care of making the others -inf since the logit_formatter will take care of the invalid ones (including the invalid ones we tested lol)
         return logp_y_g_xtilde_SPT + logp_xtilde_g_x_SPT

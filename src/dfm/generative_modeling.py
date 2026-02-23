@@ -290,9 +290,21 @@ class MPNNTokenizer:
         self.unk_token_id = self._one_to_idx[self.unk_token]
         self._vocab_size = len(three_to_idx)
 
+        # HF-compatible attributes for interop with TokenizerTranslator etc.
+        self.mask_token_id = None
+        self.cls_token_id = None
+        self.eos_token_id = None
+        self.pad_token_id = None
+        self.added_tokens_decoder: dict[int, str] = {}  # no special tokens
+
     @property
     def vocab_size(self) -> int:
         return self._vocab_size
+
+    @property
+    def vocab(self) -> dict[str, int]:
+        """Token-to-index mapping, compatible with HF tokenizer interface."""
+        return dict(self._one_to_idx)
 
     def encode(self, sequence: str) -> list[int]:
         """Convert a single-letter AA sequence to token indices."""
