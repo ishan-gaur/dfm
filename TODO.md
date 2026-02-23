@@ -1,3 +1,5 @@
+TODO[pi] integrate with https://github.com/COLA-Laboratory/GraphFLA to get the different fitness landscapes
+
 - [ ] Test guided sampling
     - [ ] Get a stability guided generation demo
         - [ ] ESM3IF
