@@ -9,40 +9,69 @@ Requirements:
     - GPU with enough memory for ESM3 + classifier
 """
 
-import os  # TODO[pi] use pathlib instead
+from pathlib import Path
+
 import numpy as np
-from dfm.models import ESM3IF
-from dfm.models.utils import pdb_to_atom37_and_seq
-from dfm.models import PreTrainedStabilityPredictor
-from dfm.models.rocklin_ddg.stability_predictor import StabilityPredictorConditioning
-from dfm.sampling import sample_euler
-from dfm.guide import TAG
+import torch
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from dfm.models.esm import ESM3IF
+from dfm.models.rocklin_ddg.stability_predictor import (
+    PreTrainedStabilityPredictor,
+    StabilityPMPNN,
+)
+from dfm.models.rocklin_ddg.data_utils import (
+    load_pdb_to_graph_dict,
+    featurize,
+    compute_seq_id,
+)
+from dfm.models.utils import pdb_to_atom37_and_seq
+from dfm.sampling import sample_euler
+from dfm.guide import TAG
 
-# TODO[pi] turn this into an ipynb instead
 # -------------------------------------------------------------------------
 # Configuration
 # -------------------------------------------------------------------------
 device = "cuda"
-num_samples = 100
-batch_size = 50  # reduce if OOM
+num_samples = 10
 n_steps = 100
-x1_temp = 0.1
-guide_temp = 0.01
-stochasticity = 0.0
 
-base_dir = os.path.dirname(os.path.abspath(__file__))
-pdb_path = os.path.join(base_dir, "data", "structures", "5KPH.pdb")
-oracle_path = os.path.join(
-    base_dir, "weights", "stability_regression.pt"
-)  # TODO[pi] make into HF model
-classifier_path = os.path.join(base_dir, "weights", "noisy_classifier_146_iter_1.pt")
-output_dir = os.path.join(base_dir, "outputs")
-os.makedirs(output_dir, exist_ok=True)
+base_dir = Path(__file__).resolve().parent
+pdb_path = base_dir / "data" / "structures" / "5KPH.pdb"
+oracle_path = base_dir / "weights" / "stability_regression.pt"
+classifier_path = base_dir / "weights" / "noisy_classifier_146_iter_1.pt"
+output_dir = base_dir / "outputs"
+output_dir.mkdir(exist_ok=True)
+
+
+# -------------------------------------------------------------------------
+# Helper: evaluate ddG using oracle model directly
+# -------------------------------------------------------------------------
+def predict_stability_raw(oracle_model, sequences, cond, device):
+    """Get raw stability predictions (not log-sigmoid) for ddG computation."""
+    from dfm.generative_modeling import MPNNTokenizer
+
+    tokenizer = MPNNTokenizer()
+    tokens = tokenizer(sequences)["input_ids"].to(device)
+    B = tokens.shape[0]
+
+    X = cond["X"][:1].expand(B, -1, -1, -1).to(device)
+    mask = cond["mask"][:1].expand(B, -1).to(device)
+    chain_M = cond["chain_M"][:1].expand(B, -1).to(device)
+    residue_idx = cond["residue_idx"][:1].expand(B, -1).to(device)
+    chain_encoding_all = cond["chain_encoding_all"][:1].expand(B, -1).to(device)
+
+    with torch.no_grad():
+        return (
+            oracle_model(X, tokens, mask, chain_M, residue_idx, chain_encoding_all)
+            .reshape(-1)
+            .cpu()
+            .numpy()
+        )
+
 
 # -------------------------------------------------------------------------
 # 1. Load ESM3 model
@@ -54,82 +83,74 @@ esm_model = ESM3IF().to(device)
 # 2. Load stability models
 # -------------------------------------------------------------------------
 print("Loading stability models...")
-# Noisy classifier for guidance (one_hot_encode_input=True enables TAG)
-# Oracle regression model for evaluation
-stability_predictor = PreTrainedStabilityPredictor(classifier_path).to(device).eval()
-oracle = PreTrainedStabilityPredictor(oracle_path).to(device).eval()
-
-
-# -------------------------------------------------------------------------
-# 3. Prepare conditioning inputs (PMPNN alphabet for predictors)
-# -------------------------------------------------------------------------
-print("Preparing conditioning inputs...")
-coords_RAX, wt_seq = pdb_to_atom37_and_seq(pdb_path, backbone_only=True)
-print(f"Wildtype sequence ({len(wt_seq)} aa): {wt_seq}")
-
-coords_RAX, wt_seq = pdb_to_atom37_and_seq(pdb_path, backbone_only=True)
-esm_model.set_condition_({"coords_RAX": coords_RAX})
-masked_sequences_SP = ["<mask>" * len(wt_seq) for _ in range(num_samples)]
-unguided_seqs = sample_euler(esm_model, masked_sequences_SP, n_steps)
-guided_seqs = sample_euler(
-    TAG(esm_model, stability_predictor),
-    masked_sequences_SP, 
-    n_steps
+classifier = (
+    PreTrainedStabilityPredictor(str(classifier_path), one_hot_encode_input=True)
+    .to(device)
+    .eval()
 )
 
-
-
-# -------------------------------------------------------------------------
-# 4. Format coordinates for ESM3 (atom37)
-# -------------------------------------------------------------------------
-esm_model.set_condition_(
-    {"coords_RAX": coords_RAX}
-)  # TODO[pi] I like the convention of making this a dict, but it's cumbersome. Its main benefit is in making dataset creation, collation, and training easy; and so that there is one interface everywhere--remember the dictionary element is the forward method kwarg!
+# Oracle: raw StabilityPMPNN for evaluation (not wrapped in PredictiveModel)
+oracle_model = StabilityPMPNN.init(num_letters=21, vocab=21)
+oracle_model.load_state_dict(torch.load(str(oracle_path), weights_only=False))
+oracle_model = oracle_model.to(device).eval()
 
 # -------------------------------------------------------------------------
-# 5. Run UNGUIDED ESM3 inverse folding
-# 6. Run GUIDED ESM3 inverse folding
+# 3. Prepare conditioning inputs
+# -------------------------------------------------------------------------
+print("Preparing conditioning inputs...")
+coords_RAX, wt_seq = pdb_to_atom37_and_seq(str(pdb_path), backbone_only=True)
+print(f"Wildtype sequence ({len(wt_seq)} aa): {wt_seq}")
+
+# Structure conditioning for ESM3 inverse folding
+esm_model.set_condition_({"coords_RAX": coords_RAX})
+
+# Structure conditioning for stability classifier (PMPNN featurization)
+stability_cond = PreTrainedStabilityPredictor.prepare_conditioning(
+    str(pdb_path), device=device
+)
+classifier.set_condition_(stability_cond)
+
+# -------------------------------------------------------------------------
+# 4. Run UNGUIDED ESM3 inverse folding
 # -------------------------------------------------------------------------
 print(f"\n{'=' * 60}")
 print("Running UNGUIDED ESM3 inverse folding...")
 print(f"{'=' * 60}")
-masked_sequences_SP = ["<mask>" * len(wt_seq) for _ in range(num_samples)]  # TODO
-unguided_seqs = sample_euler(esm_model, masked_sequences_SP, n_steps)
-print(unguided_seqs)
+masked_sequences = ["<mask>" * len(wt_seq)] * num_samples
+unguided_seqs = sample_euler(esm_model, masked_sequences, n_steps)
+print(f"Unguided: {len(unguided_seqs)} sequences generated")
+for i, s in enumerate(unguided_seqs[:3]):
+    print(f"  {i}: {s}")
 
+# -------------------------------------------------------------------------
+# 5. Run GUIDED ESM3 inverse folding (TAG)
+# -------------------------------------------------------------------------
 print(f"\n{'=' * 60}")
 print("Running GUIDED ESM3 inverse folding (TAG)...")
 print(f"{'=' * 60}")
-eval_cond = prepare_conditioning_inputs(pdb_path, eval_batch_size, device=device)
-stability_predictor.set_condition()
-guided_seqs = sample_euler(
-    TAG(esm_model, stability_predictor), masked_sequences_SP, n_steps
-)
-
-print(f"\nUnguided: {len(unguided_seqs)} sequences generated")
-print(f"Guided:   {len(guided_seqs)} sequences generated")
+guided_model = TAG(esm_model, classifier).to(device)
+guided_seqs = sample_euler(guided_model, masked_sequences, n_steps)
+print(f"Guided: {len(guided_seqs)} sequences generated")
+for i, s in enumerate(guided_seqs[:3]):
+    print(f"  {i}: {s}")
 
 # -------------------------------------------------------------------------
-# 7. Evaluate ddG (predicted stability relative to wildtype)
+# 6. Evaluate ddG (predicted stability relative to wildtype)
 # -------------------------------------------------------------------------
 print("\nEvaluating predicted ddG...")
-# Need cond_inputs sized for evaluation batches
-eval_batch_size = max(len(unguided_seqs), len(guided_seqs))
+unguided_preds = predict_stability_raw(oracle_model, unguided_seqs, stability_cond, device)
+guided_preds = predict_stability_raw(oracle_model, guided_seqs, stability_cond, device)
+wt_pred = predict_stability_raw(oracle_model, [str(wt_seq)], stability_cond, device)
 
-wt_dg = oracle
-unguided_ddg_raw = compute_ddg(unguided_seqs, oracle, eval_cond, device=device)
-guided_ddg_raw = compute_ddg(guided_seqs, oracle, eval_cond, device=device)
+# ddG = pred - wt_pred, sign-flipped for manuscript convention (lower = more stable)
+unguided_ddg = -1.0 * (unguided_preds - wt_pred[0])
+guided_ddg = -1.0 * (guided_preds - wt_pred[0])
 
-# Sign flip: Rocklin convention (higher = more stable) -> manuscript convention (lower = more stable)
-unguided_ddg = -1.0 * unguided_ddg_raw
-guided_ddg = -1.0 * guided_ddg_raw
-
-# Compute sequence identity to wildtype
-unguided_seq_ids = [compute_seq_id(s, wt_seq) for s in unguided_seqs]
-guided_seq_ids = [compute_seq_id(s, wt_seq) for s in guided_seqs]
+unguided_seq_ids = [compute_seq_id(s, str(wt_seq)) for s in unguided_seqs]
+guided_seq_ids = [compute_seq_id(s, str(wt_seq)) for s in guided_seqs]
 
 # -------------------------------------------------------------------------
-# 8. Print summary statistics
+# 7. Print summary statistics
 # -------------------------------------------------------------------------
 print(f"\n{'=' * 60}")
 print("Results Summary (lower ddG = more stable)")
@@ -148,7 +169,7 @@ print(
 )
 
 # -------------------------------------------------------------------------
-# 9. Plot ddG histogram with KDE
+# 8. Plot ddG histogram with KDE
 # -------------------------------------------------------------------------
 from scipy.stats import gaussian_kde
 
@@ -177,7 +198,6 @@ ax.hist(
     edgecolor="white",
 )
 
-# KDE overlay
 x_grid = np.linspace(bins[0], bins[-1], 200)
 kde_unguided = gaussian_kde(unguided_ddg)
 kde_guided = gaussian_kde(guided_ddg)
@@ -210,12 +230,12 @@ ax.spines["top"].set_visible(False)
 ax.spines["right"].set_visible(False)
 plt.tight_layout()
 
-hist_path = os.path.join(output_dir, "ddg_histogram.png")
+hist_path = output_dir / "ddg_histogram.png"
 fig.savefig(hist_path, dpi=150)
 print(f"\nHistogram saved to {hist_path}")
 
 # -------------------------------------------------------------------------
-# 10. Plot sequence identity vs ddG scatter
+# 9. Plot sequence identity vs ddG scatter
 # -------------------------------------------------------------------------
 fig2, ax2 = plt.subplots(1, 1, figsize=(7, 5))
 ax2.scatter(
@@ -243,7 +263,7 @@ ax2.spines["top"].set_visible(False)
 ax2.spines["right"].set_visible(False)
 plt.tight_layout()
 
-scatter_path = os.path.join(output_dir, "seqid_vs_ddg.png")
+scatter_path = output_dir / "seqid_vs_ddg.png"
 fig2.savefig(scatter_path, dpi=150)
 print(f"Scatter plot saved to {scatter_path}")
 
