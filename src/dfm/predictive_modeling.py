@@ -4,21 +4,29 @@ from torch.nn import functional as F
 from typing import Callable
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
+from dfm.probability_model import ProbabilityModel
 
 
-class PredictiveModel(nn.Module, ABC):
+class PredictiveModel(ProbabilityModel, ABC):
+    """Base class for predictive models used in guidance.
+
+    Subclasses implement ``forward()`` to return logits by wrapping a base
+    predictor model and converting its raw output to logits (via a
+    raw_output_to_logits conversion). ``ProbabilityModel.get_log_probs()``
+    then handles temperature-scaled log_softmax.
+
+    Child classes must set ``self.input_dim`` (vocab size) for the
+    ``target_log_probs_given_seq`` convenience method to work.
     """
-    Note, super important to not forget to set self.input_dim so the seq->ohe conversion works as expected
-    """
+
     def __init__(self, tokenizer):
         super().__init__()
         self.tokenizer = tokenizer
-        self.input_dim
 
     @abstractmethod
     def forward(
         self, ohe_seq_SPT: torch.FloatTensor
-    ):  # note this is a float as we might want to take a gradient on it
+    ):  # note this is a float and one-hot encoded as we might want to take a gradient on it
         pass
 
     @abstractmethod
@@ -27,22 +35,9 @@ class PredictiveModel(nn.Module, ABC):
         # value or class logits turn into a cdf or class probability
         pass
 
-    @abstractmethod
-    def target_log_probs_given_seq(ohe_seq_SPT: torch.FloatTensor):
-        pass
-
-    def target_log_probs_given_seq(self, seq_SP):
-        ohe_seq_SPT = F.one_hot(seq_SP, self.input_dim)
+    def get_log_prob_target_given_seq(self, seq_SP):
+        ohe_seq_SPT = F.one_hot(seq_SP, self.input_dim).float()
         return self.target_log_probs_given_ohe(ohe_seq_SPT)
-
-    @abstractmethod
-    def target_log_probs_given_seq(self, seq_SP):
-        # basically applies the model to get the right probability using the specified target
-        pass
-
-    @abstractmethod
-    def target_log_probs_given_ohe(self, ohe_seq_SPT: torch.FloatTensor):
-        pass
 
 
 class RealValuedPredictiveModel(PredictiveModel, ABC):
@@ -65,7 +60,7 @@ class RealValuedPredictiveModel(PredictiveModel, ABC):
     ) -> float:  # Prediction could be ensemble of values, mean/variance, monte-carlo samples, even the CDF
         pass
 
-    def target_log_probs_given_ohe(self, ohe_seq_SP):
+    def target_log_probs_given_ohe(self, ohe_seq_SPT):
         prediction = self.forward(ohe_seq_SPT)
         logp_y_g_x_S = self.compute_log_cdf(prediction)
         return logp_y_g_x_S
@@ -78,37 +73,32 @@ class EnsemblePredictiveModel(RealValuedPredictiveModel):
 class ClassValuedPredictiveModel(PredictiveModel, ABC):
     def __init__(self, tokenizer):
         super().__init__(tokenizer)
-        self.class = None
-        self.temp = 1.0
+        self.target_class = None
 
     @contextmanager
-    def with_target(self, class: int):
-        pre_context_class = self.class
-        self.class = class
+    def with_target(self, target_class: int):
+        pre_context_class = self.target_class
+        self.target_class = target_class
         try:
             yield self
         finally:
-            self.class = pre_context_target
+            self.target_class = pre_context_class
 
-    # TODO[pi] make this a mixin
-    @contextmanager
-    def with_temp(self, temp: float) -> TransitionModel:
-        """
-        The ``with_temp`` method modifies the state of the instantiated
-        objecte so that the transition_log_probs function returned by the class is
-        computed from the logits using the specified temperature.
-        """
-        pre_context_temp = self.temp
-        self.temp = temp
-        try:
-            yield self
-        finally:
-            self.temp = pre_context_temp
-
-    def target_log_probs_given_ohe(self, ohe_seq_SP):
-        logits_y_g_x_SC= self.forward(ohe_seq_SPT)
-        logp_y_g_x_S = F.log_softmax(logits_y_g_x_SC / temp)[:, self.class]
+    def target_log_probs_given_ohe(self, ohe_seq_SP: torch.LongTensor):
+        logits_y_g_x_SC = self.forward(ohe_seq_SP)
+        logp_y_g_x_S = F.log_softmax(logits_y_g_x_SC / self.temp)[:, self.target_class]
         return logp_y_g_x_S
+
+
+# TODO[pi] RealValuedPredictiveModel, ClassValuedPredictiveModel, and
+# EnsemblePredictiveModel should be refactored into TargetProbabilityMixin
+# variants. TargetProbabilityMixin is an ABC whose concrete versions
+# (ClassTargetMixin, RealValuedTargetMixin, EnsembleTargetMixin,
+# GaussianTargetMixin) each define how a model's raw output (logits,
+# regression value, ensemble, mean/variance) gets converted into
+# log p(target_event | x). These would be mixed into PredictiveModel
+# subclasses instead of baked into the class hierarchy.
+
 
 
 # ==========================================================================================
@@ -122,8 +112,11 @@ class ClassValuedPredictiveModel(PredictiveModel, ABC):
 
 class PreTrainedEmbeddingModel(nn.Module, ABC):
     EMB_DIM = None
+
     @abstractmethod
-    def forward_ohe(self, ohe_seq_SPT: torch.FloatTensor) -> (torch.FloatTensor, torch.FloatTensor):
+    def forward_ohe(
+        self, ohe_seq_SPT: torch.FloatTensor
+    ) -> (torch.FloatTensor, torch.FloatTensor):
         # returns both the log probs and embeddings
         pass
 

@@ -9,12 +9,13 @@ from .data import (
 
 from .generative_modeling import (
     TransitionModel,
-    ConditionalTransitionModel,
     LogitFormatter,
     MaskedModelLogitFormatter,
 )
 
-from .predictive_model import PredictiveModel, LinearProbe
+from .probability_model import ProbabilityModel
+
+from .predictive_modeling import PredictiveModel, LinearProbe
 
 from .sampling import sample_any_order_ancestral
 
@@ -24,8 +25,8 @@ __all__ = [
     "NoiseSchedule",
     "unmasked_only",
     "uniform_schedule",
+    "ProbabilityModel",
     "TransitionModel",
-    "ConditionalTransitionModel",
     "LogitFormatter",
     "MaskedModelLogitFormatter",
     "sample_any_order_ancestral",

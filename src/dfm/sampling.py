@@ -30,7 +30,7 @@ def sample_any_order_ancestral(model: TransitionModel, x_SP: torch.LongTensor):
 
     t = t_st
     while t != t_end:
-        x_SP = any_order_ancestral_step(model.transition_log_probs, x_SP, mask_token_id)
+        x_SP = any_order_ancestral_step(model.get_log_probs, x_SP, mask_token_id)
         len_S = x_SP.size(1) - (x_SP == pad_token_id).sum(dim=1)
         t_S = 1 - (x_SP == mask_token_id).sum(dim=1) / len_S
         t_new = t_S.min().item()

@@ -10,9 +10,10 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from transformers import PreTrainedTokenizerBase
-from typing import Protocol, runtime_checkable, Optional, Callable, Dict, List
+from typing import Protocol, runtime_checkable, Optional, Callable, Dict, List, Any
 from contextlib import contextmanager
 from abc import ABC, abstractmethod
+from dfm.probability_model import ProbabilityModel
 
 
 # TODO[pi] add a DFM Protocol and Base Class which defines a score method which returns logits for each positions and makes sure to do things like force register token probs to themselves and regular tokens to only be regular tokens, etc. Actually give it a fix register tokens method and allow child classes to specify those token ids and output indices in the init to make it easy. Maybe the model output formatter is a general thing that's defined ... -- like what's the best way to spec the output_dim of ESM models??
@@ -22,208 +23,83 @@ TransitionFunc = Callable[
 ]  # takes in sequence outputs log_probs
 
 
-class TransitionModel(nn.Module, ABC):
-    """
-    Standard interface for wrapping models for DFM sampling and guidance.
-    NOTE that for our sampling interfaces to work, you must include the
-    tokenizer in the model as an instance variable.
+class TransitionModel(ProbabilityModel):
+    """Wraps a model + logit formatter into a ready-to-use probability model.
 
-    Child classes must implement ``forward`` and pass a tokenizer and logit
-    formatter to ``super().__init__``.  For most use-cases
-    ``PassThroughLogitFormatter`` or ``MaskedModelLogitFomatter`` will suffice.
+    Pass in any ``nn.Module`` whose forward returns logits, a tokenizer, and a
+    ``LogitFormatter`` (e.g. ``MaskedModelLogitFormatter`` for masked diffusion,
+    ``PassThroughLogitFormatter`` for uniform noise). ``TransitionModel`` handles
+    the rest: forward runs the wrapped model, applies logit formatting, and
+    ``get_log_probs`` (inherited from ``ProbabilityModel``) adds temperature-scaled
+    log_softmax.
 
-    Example (mirrors the ESM wrapper in esm-cath)::
+    For structure-conditioned models, subclass and override
+    ``preprocess_observations`` and ``collate_observations``, then use
+    ``set_condition_()`` / ``conditioned_on()`` to cache structure tensors.
 
-        class ESM(TransitionModel):
-            OUTPUT_DIM = 64
+    Example::
 
-            def __init__(self, checkpoint="esmc_300m"):
-                tokenizer = EsmSequenceTokenizer()
-                format_logits = MaskedModelLogitFormatter(tokenizer, "<mask>", self.OUTPUT_DIM)
-                super().__init__(tokenizer=tokenizer, logit_formatter=format_logits)
-                self.model = ESMC.from_pretrained(checkpoint)
+        esmc = ESMC.from_pretrained("esmc_300m")
+        tokenizer = EsmSequenceTokenizer()
+        formatter = MaskedModelLogitFormatter(tokenizer)
+        model = TransitionModel(esmc, tokenizer, formatter)
 
-            def forward(self, seq_SP):
-                logits = self.model(seq_SP).sequence_logits.float()
-                logits = self.logit_formatter(logits, seq_SP)
-                return F.log_softmax(logits, dim=-1)
+        # unconditional
+        log_probs = model.get_log_probs(seq_SP)
+
+        # with temperature
+        with model.with_temp(0.5):
+            log_probs = model.get_log_probs(seq_SP)
     """
 
     def __init__(
-        self, tokenizer: PreTrainedTokenizerBase, logit_formatter: LogitFormatter
+        self,
+        model: nn.Module,
+        tokenizer: PreTrainedTokenizerBase,
+        logit_formatter: LogitFormatter,
     ):
         super().__init__()
+        self.model = model
         self.tokenizer = tokenizer
         self.logit_formatter = logit_formatter
-        self.temp = 1.0
 
-    @abstractmethod
-    def forward(self, seq_SP: torch.LongTensor) -> torch.FloatTensor:
-        """Returns Logits"""
-        pass
-
-    @property
-    def device(self):
-        return next(self.parameters()).device
-
-    def log_probs_from_string(
-        self, sequences: list[str]
-    ):  # TODO[pi] check all the types hints in the src folder
-        tokenized = self.tokenizer(sequences, padding=True, return_tensors="pt")
-        # TODO[pi]
-        seq_SP = tokenized["input_ids"].to(device=self.device, dtype=torch.long)
-        return self.get_transition_log_probs_fn()(seq_SP)
-
-    @contextmanager
-    def with_temp(self, temp: float) -> TransitionModel:
-        """
-        The ``with_temp`` method modifies the state of the instantiated
-        objecte so that the transition_log_probs function returned by the class is
-        computed from the logits using the specified temperature.
-        """
-        pre_context_temp = self.temp
-        self.temp = temp
-        try:
-            yield self
-        finally:
-            self.temp = pre_context_temp
-
-    def set_temp_(self, temp: float):
-        self.temp = temp
-
-    def transition_log_probs(self, seq_SP: torch.LongTensor) -> torch.FloatTensor:
-        logits_SPT = self.forward(seq_SP)
-        logits_SPT = self.logit_formatter(logits_SPT, seq_SP)
-        logp_seq_SPT = F.log_softmax(logits_SPT / self.temp, dim=2)
-        return logp_seq_SPT
-
-
-"""
-An alternative design could even be to have stacks of conditioning variables
-so the user could marginalize or condition on things dynamically, but
-this seems like overkill as I'm not sure many people would benefit from such a
-feature right now
-
-from abc import ABC, abstractmethod
-from contextlib import contextmanager
-from collections import ChainMap
-
-
-class Conditionable:
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._condition_stack = []
-
-    @property
-    def condition(self):
-        # merged view of all active conditions
-        if not self._condition_stack:
-            return {}
-        return dict(ChainMap(*reversed(self._condition_stack)))
-
-    @contextmanager
-    def conditioned_on(self, **kwargs):
-        self._condition_stack.append(kwargs)
-        try:
-            yield self
-        finally:
-            self._condition_stack.pop()    
-"""
-
-
-class ConditionalTransitionModel(TransitionModel):
-    """
-    For these models, we expect the get_transition_log_probs_fn to return
-    two different calc_log_probs methods depending on if the model is being
-    called conditionally or not, but this is totally up to the user.
-
-    Users of the library implementing this ABC normally will just need to
-    implement a collator for the dictionary of observation lists--which
-    will be needed for use with the datasets anyways--and the init and
-    forward functions, just like for any other nn.Module subclass.
-
-    Note that if unconditional inference requires some observations, those
-    can be set as the initial value of observations in the init function
-    and the context managers will automatically revert back to it when
-    all conditioning contexts have been exited
-    """
-
-    def __init__(
-        self, tokenizer: PreTrainedTokenizerBase, logit_formatter: LogitFormatter
-    ):
-        super().__init__(tokenizer, logit_formatter)
-        self.observations: Optional[Dict] = None
-
-    @staticmethod
-    @abstractmethod
-    def observation_collator(observations: Dict[List]) -> Dict[torch.Tensor]:
-        """
-        Converts the observations into the proper form to be input to
-        the forward function.
-        """
-        pass
-
-    @abstractmethod
     def forward(self, seq_SP: torch.LongTensor, **kwargs) -> torch.FloatTensor:
-        """
-        Returns Logits. Note the only difference is the introduction of kwargs
-        TODO[pi] should we consider adding kwargs to the regular forward??
-        I feel like we shouldn't? It kind of breaks the spirit of the unconditional model?
-        """
-        pass
+        logits_SPT = self.model(seq_SP, **kwargs)
+        return logits_SPT
 
-    # TODO[pi] actually, however this is done should be consistent with the bayes rule thing, so conditioning
-    # should change the transition model so that the get_transition_log_prob_fn changes or so that it returns
-    # a new, appropriate object. The downside is that each version will have its own copy of the parameters
-    # which is so stupid...
-    # TODO[pi] add an underscore to anything not meant to be a public interface
-    @contextmanager
-    def conditioned_on(self, observations: Dict) -> TransitionModel:
-        """
-        The ``conditioned_on`` method modifies the` state of the instantiated
-        objected so that the calc_log_probs function returned by the class is actually
-        a conditional probability distribution according to the label information
-        provided here as input.
-
-        The ``get_transition_log_probs_fn`` then uses this instance variable to create the
-        correct ``calc_log_probs`` function.
-
-        In order to convert the raw observation dictionary
-        """
-        pre_context_obs = self.observations
-        self.observations = observations
-        try:
-            yield self
-        finally:
-            self.observations = pre_context_obs
-
-    def set_condition_(self, observations: Dict):
-        self.observations = observations
-
-    def set_condition(self, observations: Dict) -> ConditionalTransitionModel:
-        self.observations = observations
-        return self
-
-    def transition_log_probs(
-        self, seq_SP: torch.LongTensor, temp: float = 1.0
+    def format_raw_to_logits(
+        self, raw_forward_output: torch.FloatTensor, seq_SP: torch.LongTensor, **kwargs
     ) -> torch.FloatTensor:
-        if self.observations is not None:
-            batch_size = seq_SP.size(0)
-            tiled_obs = {k: [v] * batch_size for k, v in self.observations.items()}
-            obs_dict = self.__class__.observation_collator(tiled_obs)
-            logits_SPT = self.forward(seq_SP, **obs_dict)
-        else:
-            try:
-                logits_SPT = self.forward(seq_SP)
-            except TypeError as e:
-                # TODO[pi] can you fix this so that it correctly displays the type error and hints that it might be because unconditional inference is not supported?
-                print(e)
-                raise NotImplementedError(
-                    f"Unconditional inference is not supported for {self.__class__.__name__}"
-                )
+        """Default: model produces outputs, they might just not be masked properly."""
+        logits_SPT = raw_forward_output
         logits_SPT = self.logit_formatter(logits_SPT, seq_SP)
-        logp_seq_SPT = F.log_softmax(logits_SPT / self.temp, dim=2)
-        return logp_seq_SPT
+        return raw_forward_output
+
+    def preprocess_observations(self, observations: Dict[str, Any]) -> Dict[str, Any]:
+        """Default: pass through. Override for expensive one-time caching."""
+        return observations
+
+    # We might not want to actually define this upfront?
+    # Like one of the observations might be a huge tensor you only want one copy of
+    # But at least if this is defined this becomes a concrete class
+    def collate_observations(
+        self, x_B: torch.Tensor, observations: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Default: tile each observation tensor to match batch size."""
+        batch_size = x_B.size(0)
+        return {
+            k: v.unsqueeze(0).expand(batch_size, *v.shape)
+            if isinstance(v, torch.Tensor) and v.dim() > 0
+            else v
+            for k, v in observations.items()
+        }
+
+    def get_log_probs_from_string(
+        self, sequences: list[str]
+    ):  # TODO[pi] check all the type hints in the src folder
+        tokenized = self.tokenizer(sequences, padding=True, return_tensors="pt")
+        seq_SP = tokenized["input_ids"].to(device=self.device, dtype=torch.long)
+        return self.get_log_probs(seq_SP)
 
 
 @runtime_checkable
@@ -244,13 +120,11 @@ class LogitFormatter(Protocol):
     Must return a FloatTensor so that the softmax doesn't have normalization
     issues due to a lack of precision.
 
-    Design note — implementation approaches:
-        The reference implementation (MaskedModelLogitFomatter) uses a precomputed
-        dense additive mask matrix indexed by input token ids. This is the right
-        tradeoff for typical protein/NLP vocabularies (33–30k tokens): the matrix
+    Design note — possible implementation approaches:
+        - **Reference implementation (MaskedModelLogitFomatter)** uses a precomputed
+        dense additive mask matrix indexed by input token ids. The translation matrix
         is built once at init and reused every forward pass, fully vectorized with
         no branching. Alternative approaches include:
-
         - **In-place scatter**: no precomputed matrix; loop over positions at forward
           time and write -inf into invalid outputs. Simple but slow.
         - **Boolean mask + masked_fill**: store a boolean matrix (1 bit vs 32 bits
