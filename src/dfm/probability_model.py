@@ -38,21 +38,6 @@ class ProbabilityModel(nn.Module, ABC):
         return next(self.parameters()).device
 
     @abstractmethod
-    def forward(self, x_B: torch.Tensor, **kwargs) -> Any:
-        """Return logits from batched input."""
-
-    @abstractmethod
-    def format_raw_to_logits(
-        self, raw_forward_output: Any, x_B: torch.Tensor, **kwargs
-    ) -> torch.FloatTensor:
-        """Convert raw forward output to logits suitable for log_softmax.
-
-        Examples: output masking (transition models), coarse-graining classes,
-        turning ensemble predictions into per-class logits, etc.
-        """
-        ...
-
-    @abstractmethod
     def preprocess_observations(self, observations: Dict[str, Any]) -> Dict[str, Any]:
         """Transform raw observations into cached form.
 
@@ -62,9 +47,10 @@ class ProbabilityModel(nn.Module, ABC):
         """
         ...
 
+    @staticmethod
     @abstractmethod
     def collate_observations(
-        self, x_B: torch.Tensor, observations: Dict[str, Any]
+        x_B: torch.Tensor, observations: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Collate observations for input to the forward function."""
         ...
@@ -86,6 +72,21 @@ class ProbabilityModel(nn.Module, ABC):
             yield self.set_condition(observations)
         finally:
             self.observations = pre_context_obs
+
+    @abstractmethod
+    def forward(self, x_B: torch.Tensor, **kwargs) -> Any:
+        """Return logits from batched input."""
+
+    @abstractmethod
+    def format_raw_to_logits(
+        self, raw_forward_output: Any, x_B: torch.Tensor, **kwargs
+    ) -> torch.FloatTensor:
+        """Convert raw forward output to logits suitable for log_softmax.
+
+        Examples: output masking (transition models), coarse-graining classes,
+        turning ensemble predictions into per-class logits, etc.
+        """
+        ...
 
     def set_temp_(self, temp: float):
         self.temp = temp

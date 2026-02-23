@@ -1,10 +1,11 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from typing import Callable
+from typing import Callable, Any, Dict
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dfm.probability_model import ProbabilityModel
+from transformers import PreTrainedTokenizerBase
 
 
 class PredictiveModel(ProbabilityModel, ABC):
@@ -19,25 +20,37 @@ class PredictiveModel(ProbabilityModel, ABC):
     ``target_log_probs_given_seq`` convenience method to work.
     """
 
-    def __init__(self, tokenizer):
+    def __init__(self, model: nn.Module, tokenizer: PreTrainedTokenizerBase):
         super().__init__()
+        self.model = model
         self.tokenizer = tokenizer
 
     @abstractmethod
     def forward(
-        self, ohe_seq_SPT: torch.FloatTensor
+        self, ohe_seq_SPT: torch.FloatTensor, **kwargs
     ):  # note this is a float and one-hot encoded as we might want to take a gradient on it
-        pass
+        raw_output = self.model(ohe_seq_SPT)
+        return raw_output
 
     @abstractmethod
-    def with_target(self, target):
+    def format_raw_to_logits(
+        self, raw_output: Any, ohe_seq_SPT: torch.FloatTensor, **kwargs
+    ):
         # sets a specification of the target so that the raw forward regression
         # value or class logits turn into a cdf or class probability
-        pass
+        ...
 
-    def get_log_prob_target_given_seq(self, seq_SP):
+    # TODO[pi] make a note in the documentation somewhere that we recommend
+    # making a typeddict for the conditioning information and setting
+    # the kwargs for these functions as regular arguments
+    @abstractmethod
+    def preprocess_observations(
+        self, observations: Dict[str, Any]
+    ) -> Dict[str, Any]: ...
+
+    def get_log_prob_target_from_seq(self, seq_SP):
         ohe_seq_SPT = F.one_hot(seq_SP, self.input_dim).float()
-        return self.target_log_probs_given_ohe(ohe_seq_SPT)
+        return self.get_log_probs(ohe_seq_SPT)
 
 
 class RealValuedPredictiveModel(PredictiveModel, ABC):
@@ -70,7 +83,15 @@ class EnsemblePredictiveModel(RealValuedPredictiveModel):
     pass
 
 
-class ClassValuedPredictiveModel(PredictiveModel, ABC):
+class GaussianPredictiveModel(RealValuedPredictiveModel):
+    pass
+
+
+class BinaryVariablePredictiveModel(ProbabilityModel):
+    pass
+
+
+class CategoricalVariablePredictiveModel(ProbabilityModel, ABC):
     def __init__(self, tokenizer):
         super().__init__(tokenizer)
         self.target_class = None
@@ -98,7 +119,6 @@ class ClassValuedPredictiveModel(PredictiveModel, ABC):
 # regression value, ensemble, mean/variance) gets converted into
 # log p(target_event | x). These would be mixed into PredictiveModel
 # subclasses instead of baked into the class hierarchy.
-
 
 
 # ==========================================================================================

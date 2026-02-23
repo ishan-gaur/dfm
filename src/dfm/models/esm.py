@@ -1,3 +1,4 @@
+import attr
 import torch
 from torch import nn
 from dfm.generative_modeling import (
@@ -6,10 +7,16 @@ from dfm.generative_modeling import (
     LogitFormatter,
 )
 from dfm.predictive_modeling import PreTrainedEmbeddingModel
-from transformers import PreTrainedTokenizerBase
+from esm.utils import generation
+from esm.sdk.api import ESMProtein, LogitsConfig
 from esm.models.esmc import ESMC as _ESMC
 from esm.models.esmc import ESMCOutput
+from esm.models.esm3 import ESM3 as _ESM3
+from esm.models.esm3 import ESMOutput
 from esm.tokenization.sequence_tokenizer import EsmSequenceTokenizer
+from transformers import PreTrainedTokenizerBase
+from typing import TypedDict
+import numpy as np
 
 
 class ESMC(TransitionModel):
@@ -40,3 +47,63 @@ class ESMC(TransitionModel):
 
 
 # TODO[pi] implement ESM3IF as a structure-conditioned TransitionModel
+class ESM3IF(TransitionModel):
+    OUTPUT_DIM = 33
+
+    class StructureCondition(TypedDict):
+        coords_RAX: np.array
+
+    def __init__(self, esm3_checkpoint: str = "esm3-open"):
+        tokenizer = EsmSequenceTokenizer()
+        logit_formatter = MaskedModelLogitFormatter(tokenizer, ESM3IF.OUTPUT_DIM)
+        esmc = _ESM3.from_pretrained(esm3_checkpoint).eval()
+        super().__init__(
+            model=esmc, tokenizer=tokenizer, logit_formatter=logit_formatter
+        )
+
+    # TODO[pi] the collate functions should be static to be used by dataloaders
+    def collate_observations(
+        self, seq_SP: torch.LongTensor, observations: StructureCondition
+    ):
+        # Encode structure to get input tokens (adds cls/eos)
+        coords = observations["coords_RAX"]
+        batch_size = seq_SP.shape[0]
+        return {
+            "input_tokens": [
+                self.model.encode(ESMProtein(coordinates=coords))
+                for _ in range(batch_size)
+            ]
+        }
+
+    def forward(self, seq_SP, input_tokens):
+        """Forward pass of ESM3 as inverse folding model.
+
+        Args:
+            model: ESM3 model
+            xt: partially masked sequence tokens (B, D)
+            input_tokens: list of ESMProteinTensor (batch templates with structure)
+
+        Returns:
+            logits (B, D, S)
+        """
+
+        tokenizers = self.model.tokenizers
+        sampled_tokens = [attr.evolve(tokens) for tokens in input_tokens]
+        device = sampled_tokens[0].device
+
+        sequence_lengths = [len(tokens) for tokens in sampled_tokens]
+        batched_tokens = generation._stack_protein_tensors(
+            sampled_tokens, sequence_lengths, tokenizers, device
+        )
+
+        xt = seq_SP
+        xt_copy = xt.clone()
+        xt_copy[..., 0] = tokenizers.sequence.cls_token_id
+        xt_copy[..., -1] = tokenizers.sequence.eos_token_id
+        setattr(batched_tokens, "sequence", xt_copy)
+
+        forward_output = self.model.logits(batched_tokens, LogitsConfig(sequence=True))
+        logits = forward_output.logits.sequence[
+            ..., : self.model.tokenizers.sequence.vocab_size
+        ]
+        return logits

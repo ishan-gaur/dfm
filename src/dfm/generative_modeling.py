@@ -64,8 +64,8 @@ class TransitionModel(ProbabilityModel):
         self.logit_formatter = logit_formatter
 
     def forward(self, seq_SP: torch.LongTensor, **kwargs) -> torch.FloatTensor:
-        logits_SPT = self.model(seq_SP, **kwargs)
-        return logits_SPT
+        raw_forward_output = self.model(seq_SP, **kwargs)
+        return raw_forward_output
 
     def format_raw_to_logits(
         self, raw_forward_output: torch.FloatTensor, seq_SP: torch.LongTensor, **kwargs
@@ -73,12 +73,16 @@ class TransitionModel(ProbabilityModel):
         """Default: model produces outputs, they might just not be masked properly."""
         logits_SPT = raw_forward_output
         logits_SPT = self.logit_formatter(logits_SPT, seq_SP)
-        return raw_forward_output
+        return logits_SPT
 
     def preprocess_observations(self, observations: Dict[str, Any]) -> Dict[str, Any]:
         """Default: pass through. Override for expensive one-time caching."""
         return observations
 
+    # TODO[pi] maybe we should make this an abstract class and not have it
+    # take a model as input. The current setup makes it easy to take
+    # a model as input, but doesn't set it up as a parent classes for
+    # creating models in the first place. Then "default" code like the below could be removed.
     # We might not want to actually define this upfront?
     # Like one of the observations might be a huge tensor you only want one copy of
     # But at least if this is defined this becomes a concrete class
@@ -196,8 +200,8 @@ class MaskedModelLogitFormatter(nn.Module, LogitFormatter):
         output_dim: Optional[int] = None,
     ):
 
-        nn.Module.__init__(self)
-
+        # nn.Module.__init__(self)
+        super().__init__()
         self.tokenizer = tokenizer
         if output_dim is None:
             self.output_dim = self.tokenizer.vocab_size

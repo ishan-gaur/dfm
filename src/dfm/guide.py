@@ -2,7 +2,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from dfm.generative_modeling import TransitionModel
-from dfm.predictive_model import PredictiveModel
+from dfm.predictive_modeling import PredictiveModel
 from transformers import PreTrainedTokenizerBase
 from contextlib import contextmanager
 from typing import Optional, List
