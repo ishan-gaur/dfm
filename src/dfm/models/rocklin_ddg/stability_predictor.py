@@ -500,11 +500,15 @@ class PreTrainedStabilityPredictor(PredictiveModel):
         return torch.log(F.sigmoid(logit.reshape(-1)))
 
     def get_log_probs(self, x_B: torch.Tensor) -> torch.Tensor:
-        """Return log p(stable | x). Scalar per sequence, no log_softmax."""
+        """Return temperature-scaled log p(stable | x). Scalar per sequence.
+
+        Lower temp → stronger guidance signal (gradient scales as 1/temp).
+        """
         if self.observations is not None:
             obs = self.collate_observations(x_B, self.observations)
             raw_output = self.forward(x_B, **obs)
-            return self.format_raw_to_logits(raw_output, x_B, **obs)
+            log_probs = self.format_raw_to_logits(raw_output, x_B, **obs)
+            return log_probs / self.temp
         else:
             raise ValueError(
                 "StabilityPredictor requires structure conditioning. "

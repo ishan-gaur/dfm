@@ -38,6 +38,7 @@ from dfm.guide import TAG
 device = "cuda"
 num_samples = 10
 n_steps = 100
+guide_temp = 0.01  # lower = stronger guidance
 
 base_dir = Path(__file__).resolve().parent
 pdb_path = base_dir / "data" / "structures" / "5KPH.pdb"
@@ -109,6 +110,7 @@ stability_cond = PreTrainedStabilityPredictor.prepare_conditioning(
     str(pdb_path), device=device
 )
 classifier.set_condition_(stability_cond)
+classifier.set_temp_(guide_temp)
 
 # -------------------------------------------------------------------------
 # 4. Run UNGUIDED ESM3 inverse folding
